@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: (c) TagStudio Contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
+
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column
+
+from tagstudio.core.library.alchemy.db import Base
+
+
+class TagParent(Base):
+    __tablename__ = "tag_parents"
+
+    parent_id: Mapped[int] = mapped_column(ForeignKey("tags.id"), primary_key=True)
+    child_id: Mapped[int] = mapped_column(ForeignKey("tags.id"), primary_key=True)
+
+
+class TagEntry(Base):
+    __tablename__ = "tag_entries"
+
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tags.id"), primary_key=True)
+    entry_id: Mapped[int] = mapped_column(ForeignKey("entries.id"), primary_key=True)
+
+
+class CategoryExclusion(Base):
+    __tablename__ = "category_exclusions"
+
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tags.id"), primary_key=True)
+    category_id: Mapped[int] = mapped_column(ForeignKey("tags.id"), primary_key=True)

@@ -1,0 +1,37 @@
+<!-- SPDX-FileCopyrightText: 2016-2025 Martin Donath <martin.donath@squidfunk.com> -->
+<!-- SPDX-FileCopyrightText: (c) TagStudio Contributors -->
+<!-- SPDX-License-Identifier: MIT -->
+
+
+
+<!-- Table of contents item -->
+<li class="md-nav__item">
+  <a href="{{ toc_item.url }}" class="md-nav__link">
+    <span class="md-ellipsis">
+
+      <!-- Typeset title -->
+      {% if toc_item.typeset %}
+        <span class="md-typeset">
+          {{ toc_item.typeset.title }}
+        </span>
+
+      <!-- Regular title -->
+      {% else %}
+        {{ toc_item.title }}
+      {% endif %}
+    </span>
+  </a>
+
+    <!-- Table of contents list -->
+    {% if toc_item.children %}
+      <nav class="md-nav" aria-label="{{ toc_item.title | striptags | e }}">
+        <ul class="md-nav__list">
+          {% for toc_item in toc_item.children %}
+          {% if not page.meta.toc_depth or toc_item.level <= page.meta.toc_depth %}
+            {% include "partials/toc-item.html" %}
+          {% endif %}
+          {% endfor %}
+        </ul>
+      </nav>
+    {% endif %}
+  </li>

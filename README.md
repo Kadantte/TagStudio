@@ -1,84 +1,94 @@
-# TagStudio (Alpha): A User-Focused Document Management System
+<!-- SPDX-FileCopyrightText: (c) TagStudio Contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# TagStudio: A User-Focused Photo & File Management System
+
+[![Downloads](https://img.shields.io/github/downloads/TagStudioDev/TagStudio/total.svg)](https://github.com/TagStudioDev/TagStudio/releases)
+[![Translations](https://hosted.weblate.org/widget/tagstudio/strings/svg-badge.svg)](https://hosted.weblate.org/projects/tagstudio/strings/)
+[![REUSE Status](https://api.reuse.software/badge/github.com/TagStudioDev/TagStudio)](https://api.reuse.software/info/github.com/TagStudioDev/TagStudio)
+[![Python Checks](https://github.com/TagStudioDev/TagStudio/actions/workflows/checks_python.yml/badge.svg)](https://github.com/TagStudioDev/TagStudio/actions/workflows/checks_python.yml)
 
 <p align="center">
-  <img width="60%" src="github_header.png">
+  <img width="60%" src="src/tagstudio/resources/qt/images/tagstudio_logo-text_color.png">
 </p>
 
-> [!CAUTION]
-> This is still a **_very_** rough personal project of mine in its infancy. I’m open-sourcing it now in order to accept contributors sooner and to better facilitate the direction of the project from an earlier stage.
-> There **_are_** bugs, and there will **_very likely_** be breaking changes!
+TagStudio is a photo & file organization application with an underlying tag-based system that focuses on giving freedom and flexibility to the user. No proprietary programs or formats, no sea of sidecar files, and no complete upheaval of your filesystem structure. **Read the documentation and more at [docs.tagstud.io](https://docs.tagstud.io)!**
 
-TagStudio is a photo & file organization application with an underlying system that focuses on giving freedom and flexibility to the user. No proprietary programs or formats, no sea of sidecar files, and no complete upheaval of your filesystem structure.
-
-<figure align="center">
-  <img width="80%" src="screenshot.jpg" alt="TagStudio Screenshot" align="center">
-
-  <figcaption><i>TagStudio Alpha v9.1.0 running on Windows 10.</i></figcaption>
-</figure>
+<p align="center">
+  <img width="80%" src="docs/assets/screenshot.png" alt="TagStudio Screenshot">
+</p>
+<p align="center">
+  <i>TagStudio Alpha v9.5.5 running on macOS Sequoia.</i>
+</p>
 
 ## Contents
 
-- [Goals](#goals)
-- [Priorities](#priorities)
-- [Current Features](#current-features)
-- [Contributing](#contributing)
+- [Feature Highlights](#feature-highlights)
+- [Basic Usage](#basic-usage)
 - [Installation](#installation)
-- [Usage](#usage)
+- [Goals & Priorities](#goals--priorities)
 - [FAQ](#faq)
 
-## Goals
+Translation hosting generously provided by [Weblate](https://weblate.org/en/). Check out our [project page](https://hosted.weblate.org/projects/tagstudio/) to help translate TagStudio!
 
-- To achieve a portable, privacy-oriented, open, extensible, and feature-rich system of organizing and rediscovering files.
-- To provide powerful methods for organization, notably the concept of tag composition, or “taggable tags”.
-- To create an implementation of such a system that is resilient against a user’s actions outside the program (modifying, moving, or renaming files) while also not burdening the user with mandatory sidecar files or otherwise requiring them to change their existing file structures and workflows.
-- To support a wide range of users spanning across different platforms, multi-user setups, and those with large (several terabyte) libraries.
-- To make the darn thing look like nice, too. It’s 2024, not 1994.
+## Feature Highlights
 
-## Priorities
+### Libraries
 
-1. **The concept.** Even if TagStudio as a project or application fails, I’d hope that the idea lives on in a superior project. The [goals](#goals) outlined above don’t reference TagStudio once - _TagStudio_ is what references the _goals._
-2. **The system.** Frontends and implementations can vary, as they should. The core underlying metadata management system is what should be interoperable between different frontends, programs, and operating systems. A standard implementation for this should settle as development continues. This opens up the doors for improved and varied clients, integration with third-party applications, and more.
-3. **The application.** If nothing else, TagStudio the application serves as the first (and so far only) implementation for this system of metadata management. This has the responsibility of doing the idea justice and showing just what’s possible when it comes to user file management.
-4. (The name.) I think it’s fine for an app or client, but it doesn’t really make sense for a system or standard. I suppose this will evolve with time.
+A TagStudio library contains all of your tags, fields for a set of files based on one of your system directories. Similar to how Obsidian [vaults](https://help.obsidian.md/vault) function, TagStudio libraries act as a layer on top of your existing folders and file structure, and don't require your to move or duplicate files.
 
-## Current Features
+TagStudio places a `.TagStudio` folder in the folder you open as a library. Files included in your library are referred to as "entries", and are kept track of inside of a SQLite database inside the `.TagStudio` folder along with tags and other library data.
 
-- Create libraries/vaults centered around a system directory. Libraries contain a series of entries: the representations of your files combined with metadata fields. Each entry represents a file in your library’s directory, and is linked to its location.
-- Add metadata to your library entries, including:
-  - Name, Author, Artist (Single-Line Text Fields)
-  - Description, Notes (Multiline Text Fields)
-  - Tags, Meta Tags, Content Tags (Tag Boxes)
-- Create rich tags composed of a name, a list of aliases, and a list of “subtags” - being tags in which these tags inherit values from.
-- Search for entries based on tags, ~~metadata~~ (TBA), or filenames/filetypes (using `filename: <query>`)
-- Special search conditions for entries that are: `untagged`/`no tags` and `empty`/`no fields`.
+### File Entries
 
-> [!NOTE]
-> For more information on the project itself, please see the [FAQ](#faq) section as well as the [documentation](/doc/index.md).
+All file types are supported in TagStudio libraries, just not all have dedicated preview support. For a full list of filetypes with supported previews, see the "[Supported Previews](https://docs.tagstud.io/preview-support)" page on the documentation site. There's also playback support for videos, audio files, and supported animated image formats.
 
-## Contributing
+For a generalized list of what's currently supported:
 
-If you're interested in contributing to TagStudio, please take a look at the [contribution guidelines](/CONTRIBUTING.md) for how to get started!
+- **Images**
+    - Raster Images (JPEG, PNG, etc.)
+    - Vector (SVG)
+    - Animated (GIF, WEBP, APNG)
+    - RAW Formats
+- **Videos**
+- **Plaintext Files**
+- **Documents** _(If supported)_
+- **eBooks** _(If supported)_
+- **Photoshop PSDs**, **Blender Projects**, **Krita Projects**, and more!
 
-## Installation
+### [Tags](https://docs.tagstud.io/tags) and [Fields](https://docs.tagstud.io/fields)
 
-To download TagStudio, visit the [Releases](https://github.com/TagStudioDev/TagStudio/releases) section of the GitHub repository and download the latest release for your system under the "Assets" section. TagStudio is available for **Windows**, **macOS** _(Apple Silicon & Intel)_, and **Linux**. Windows and Linux builds are also available in portable versions if you want a more self-contained executable to move around.
+Tags represent an object or attribute - this could be a person, place, object, concept, and more. Unlike most tagging systems, TagStudio tags are not solely represented by a line of text or a hashtag. Tags in TagStudio consist of several properties and relationships that give extra customization, searching power, and ease of tagging that cannot be achieved by string-based tags alone. TagStudio tags are designed to be as simple or as complex as you'd like, giving options to users of all skill levels and use cases.
 
-For video thumbnails and playback, you'll also need [FFmpeg](https://ffmpeg.org/download.html) installed on your system. 
+Tags currently consist of the following attributes:
 
-> [!IMPORTANT]
-> On macOS, you may be met with a message saying _""TagStudio" can't be opened because Apple cannot check it for malicious software."_ If you encounter this, then you'll need to go to the "Settings" app, navigate to "Privacy & Security", and scroll down to a section that says _""TagStudio" was blocked from use because it is not from an identified developer."_ Click the "Open Anyway" button to allow TagStudio to run. You should only have to do this once after downloading the application.
+- **Name**: The full name for your tag. **_This does NOT have to be unique!_**
+- **Shorthand Name**: The shortest alternate name for your tag, used for abbreviations.
+- **Aliases**: Alternate names your tag goes by.
+- **Color**: The display color of your tag.
+- **Parent Tags**: Other tags in which this tag inherits from. In practice, this means that this tag can be substituted in searches for any listed parent tags.
+    - Parent tags checked with the "disambiguation" checkbox next to them will be used to help disambiguate tag names that may not be unique.
+    - For example: If you had a tag for "Freddy Fazbear", you might add "Five Nights at Freddy's" as one of the parent tags. If the disambiguation box is checked next to "Five Nights at Freddy's" parent tag, then the tag "Freddy Fazbear" will display as "Freddy Fazbear (Five Nights at Freddy's)". Furthermore, if the "Five Nights at Freddy's" tag has a shorthand like "FNAF", then the "Freddy Fazbear" tag will display as "Freddy Fazbear (FNAF)".
+- **Is Category**: A property that when checked, treats this tag as a category in the preview panel.
 
-#### Optional Arguments
+Fields, like tags, are additional pieces of custom metadata that you can add to your file entries. Fields currently have several hardcoded names (e.g. "Title", "Author", "Series") but custom field names are planned for an upcoming update.
 
-Optional arguments to pass to the program.
+Field types currently include:
 
-> `--open <path>` / `-o <path>`
-> Path to a TagStudio Library folder to open on start.
+- **Text Lines**: Single lines of text.
+- **Text Boxes**: Multi-line pieces of text.
+- **Datetimes**: Dates and times.
 
-> `--config-file <path>` / `-c <path>`
-> Path to the TagStudio config file to load.
+### [Search](https://docs.tagstud.io/search)
 
-## Usage
+- Search for file entries based on tags, file path (`path:`), file types (`filetype:`), and even media types! (`mediatype:`). Path searches currently use [glob](<https://en.wikipedia.org/wiki/Glob_(programming)>) syntax, so you may need to wrap your filename or filepath in asterisks while searching. This will not be strictly necessary in future versions of the program.
+- Use and combine boolean operators (`AND`, `OR`, `NOT`) along with parentheses groups, quotation escaping, and underscore substitution to create detailed search queries
+- Use special search conditions (`special:untagged` and `special:empty`) to find file entries without tags or fields, respectively
+
+## Basic Usage
+
+> [!TIP]
+> For more usage instructions, see the [documentation site](https://docs.tagstud.io/libraries)!
 
 ### Creating/Opening a Library
 
@@ -86,161 +96,140 @@ With TagStudio opened, start by creating a new library or opening an existing on
 
 ### Refreshing the Library
 
-In order to scan for new files or file changes, you’ll need to manually go to File -> Refresh Directories.
-
-> [!NOTE]
-> In the future, library refreshing will also be automatically done in the background, or additionally on app startup.
-
-### Adding Metadata to Entries
-
-To add a metadata field to a file entry, start by clicking the “Add Field” button under the file preview in the right-hand preview panel. From the dropdown menu, select the type of metadata field you’d like to add to the entry.
-
-### Editing Metadata Fields
-
-#### Text Line / Text Box
-
-Hover over the field and click the pencil icon. From there, add or edit text in the dialog box popup.
-
-#### Tag Box
-
-Click the “+” button at the end of the Tags list, and search for tags to add inside the new dialog popup. Click the “+” button next to whichever tags you want to add. Alternatively, after you search for a tag, press the Enter/Return key to add the add the first item in the list. Press Enter/Return once more to close the dialog box
-
-> [!WARNING]
-> Keyboard control and navigation is currently _very_ buggy, but will be improved in future versions.
+Libraries under 10,000 files automatically scan for new or modified files when opened. In order to refresh the library manually, select "Refresh Directories" under the File menu or by pressing <kbd>Ctrl</kbd></kbd>+<kbd>R</kbd> (macOS: <kbd>⌘ Command</kbd>+<kbd>R</kbd>).
 
 ### Creating Tags
 
-To create a new tag, click on Edit -> New Tag from the menu bar. From there, enter a tag name, shorthand name, any tag aliases separated by newlines, any subtags, and an optional color.
+Create a new tag by accessing the "New Tag" option from the Edit menu or by pressing <kbd>Ctrl</kbd>+<kbd>T</kbd> (macOS: <kbd>⌘ Command</kbd>+<kbd>T</kbd>). In the tag creation panel, enter a tag name, optional shorthand name, optional tag aliases, optional parent tags, and an optional color.
 
-- The tag **shorthand** is a type of alias that displays in situations when screen space is more valuable (ex. as a subtag for other tags).
-- **Aliases** are alternate names for a tag. These let you search for terms other than the exact tag name in order to find the tag again.
-- **Subtags** are tags in which this tag is a child tag of. In other words, tags under this section are parents of this tag. For example, if you had a tag for a character from a show, you would make the show a subtag of this character. This would display as “Character (Show)” in most areas of the app. The first tag in this list is used as the tag shown in parentheses for specification.
-- The **color** dropdown lets you select an optional color for this tag to display as.
+#### Tag Manager
+
+You can manage your library of tags from opening the "Tag Manager" panel from Edit -> "Tag Manager" or by pressing <kbd>Ctrl</kbd>+<kbd>M</kbd> (macOS: <kbd>⌘ Command</kbd>+<kbd>M</kbd>). From here you can create, search for, edit, and permanently delete any tags you've created in your library.
 
 ### Editing Tags
 
-To edit a tag, right-click the tag in the tag field of the preview pane and select “Edit Tag”
+To edit a tag, click on it inside the preview panel or right-click the tag and select "Edit Tag" from the context menu.
 
-### Relinking Renamed/Moved Files
+### Adding Tags to File Entries
 
-Inevitably, some of the files inside your library will be renamed, moved, or deleted. If a file has been renamed or moved, TagStudio will display the thumbnail as a red tag with a cross through it _(this icon is also used for items with broken thumbnails)._ To relink moved files or delete these entries, go to Tools -> Manage Unlinked Entries. Click the “Refresh” button to scan your library for unlinked entries. Once complete, you can attempt to “Search & Relink” any unlinked entries to their respective files, or “Delete Unlinked Entries” in the event the original files have been deleted and you no longer wish to keep their metadata entries inside your library.
+Access the "Add Tag" search box by either clicking on the "Add Tag" button at the bottom of the right sidebar, accessing the "Add Tags to Selected" option from the File menu, or by pressing <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> (macOS: <kbd>⌘ Command</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd>).
+
+From here you can search for existing tags or create a new one if the one you're looking for doesn't exist. Click the "+" button next to any tags you want to the currently selected file entries. To quickly add the top result, press the <kbd>Enter</kbd>/<kbd>Return</kbd> key to add the top-most tag and reset the tag search. Press <kbd>Enter</kbd>/<kbd>Return</kbd> once more to close the dialog box. By using this method, you can quickly add various tags in quick succession just by using the keyboard!
+
+To remove a tag from a file entry, hover over the tag in the preview panel and click on the "-" icon that appears.
+
+### Adding Fields to File Entries
+
+To add a metadata field to a file entry, start by clicking the "Add Field" button at the bottom of the preview panel. From the dropdown menu, select the type of metadata field you’d like to add to the entry
+
+### Editing Fields
+
+Hover over the field and click the pencil icon. From there, add or edit text in the dialog box popup.
+
+### Relinking Moved Files
+
+Inevitably some of the files inside your library will be renamed, moved, or deleted. If a file has been renamed or moved, TagStudio will display the thumbnail as a red broken chain link. To relink moved files or delete these entries, select the "Manage Unlinked Entries" option under the Tools menu. Click the "Refresh" button to scan your library for unlinked entries. Once complete, you can attempt to "Search & Relink" any unlinked file entries to their respective files, or "Delete Unlinked Entries" in the event the original files have been deleted and you no longer wish to keep their entries inside your library.
 
 > [!WARNING]
-> There is currently no method to relink entries to files that have been renamed - only moved or deleted. This is a top priority for future releases.
+> There is currently no method to relink entries to files that have been renamed - only moved or deleted. This is a high priority for future releases.
 
 > [!WARNING]
-> If multiple matches for a moved file are found (matches are currently defined as files with a matching filename as the original), TagStudio will currently ignore the match groups. Adding a GUI for manual selection, as well as smarter automated relinking, are top priorities for future versions.
+> If multiple matches for a moved file are found (matches are currently defined as files with a matching filename as the original), TagStudio will currently ignore the match groups. Adding a GUI for manual selection, as well as smarter automated relinking, are high priorities for future versions.
 
-### Saving the Library
+See instructions in the "[Creating Development Environment](/CONTRIBUTING.md/#creating-a-development-environment)" section from the [contributing](https://docs.tagstud.io/contributing) page.
 
-Libraries are saved upon exiting the program. To manually save, select File -> Save Library from the menu bar. To save a backup of your library, select File -> Save Library Backup from the menu bar.
+## Installation
 
-### Half-Implemented Features
+To download executable builds of TagStudio, visit the [Releases](https://github.com/TagStudioDev/TagStudio/releases) page of the GitHub repository and download the latest release for your system under the "Assets" section at the bottom of the release.
 
-#### Fix Duplicate Files
+TagStudio has builds for **Windows**, **macOS** _(Apple Silicon & Intel)_, and **Linux**. We also offer portable releases for Windows and Linux which are self-contained and easier to move around.
 
-Load in a .dupeguru file generated by [dupeGuru](https://github.com/arsenetar/dupeguru/) and mirror metadata across entries marked as duplicates. After mirroring, return to dupeGuru to manage deletion of the duplicate files. After deletion, use the “Fix Unlinked Entries” feature in TagStudio to delete the duplicate set of entries for the now-deleted files
+For detailed instructions, installation help, and instructions for developing for TagStudio, please see the "[Installation](https://docs.tagstud.io/install)" page on our documentation website.
 
+> [!IMPORTANT]
+> If you're interested in contributing to TagStudio, please take a look at the [contribution guidelines](https://docs.tagstud.io/contributing) for how to get started!
+
+### Third-Party Dependencies
+
+For video thumbnails and playback, you'll also need [FFmpeg](https://ffmpeg.org/download.html) installed on your system. If you encounter any issues with this, please reference our [FFmpeg Help](/docs/help/ffmpeg.md) guide. For faster library scanning and refreshing, it's also recommended you install [ripgrep](https://github.com/BurntSushi/ripgrep).
+
+<!-- prettier-ignore -->
 > [!CAUTION]
-> While this feature is functional, it’s a pretty roundabout process and can be streamlined in the future.
+> **We do not currently publish TagStudio to any package managers. Any TagStudio distributions outside of the GitHub [Releases](https://github.com/TagStudioDev/TagStudio/releases) page are _unofficial_ and not maintained by us.**
+>
+> Installation support will not be given to users installing from unofficial sources. Use these versions at your own risk!
 
-#### Image Collage
+## Goals & Priorities
 
-Create an image collage of your photos and videos.
+TagStudio aims to create an **open** and **robust** format for file tagging that isn't burdened by the limitations of traditional tagging and file metadata systems. **TagStudio** is the first proof-of-concept implementation of this system.
 
-> [!CAUTION]
-> Collage sizes and options are hardcoded, and there's no GUI indicating the process of the collage creation.
+See the [**Roadmap**](docs/roadmap.md) on the documentation site for a complete list of planned features and estimated timeline.
 
-#### Macros
+### Overall Goals
 
-Apply tags and other metadata automatically depending on certain criteria. Set specific macros to run when the files are added to the library. Part of this includes applying tags automatically based on parent folders.
+- To achieve a portable, private, extensible, open-format, and feature-rich system of organizing and rediscovering files.
+- To provide powerful methods for organization, notably the concept of tag inheritance, or "taggable tags" _(and in the near future, the combination of composition-based tags)._
+- To create an implementation of such a system that is resilient against a user’s actions outside the program (modifying, moving, or renaming files) while also not burdening the user with mandatory sidecar files or requiring them to change their existing file structures and workflows.
+- To support a wide range of users spanning across different platforms, multi-user setups, and those with large (several terabyte) libraries.
 
-> [!CAUTION]
-> Macro options are hardcoded, and there’s currently no way for the user to interface with this (still incomplete) system at all.
+### Project Priorities
 
-#### Gallery-dl Sidecar Importing
-
-Import JSON sidecar data generated by [gallery-dl](https://github.com/mikf/gallery-dl).
-
-> [!CAUTION]
-> This feature is not supported or documented in any official capacity whatsoever. It will likely be rolled-in to a larger and more generalized sidecar importing feature in the future.
-
-## Launching/Building From Source
-
-See instructions in the "[Creating Development Environment](/CONTRIBUTING.md/#creating-a-development-environment)" section from the [contribution documentation](/CONTRIBUTING.md).
+1. **The concept.** Even if TagStudio as an application fails, I’d hope that the idea lives on in a superior project. The goals outlined above don’t reference TagStudio once - _TagStudio_ is what references the _goals._
+2. **The system.** Frontends and implementations can vary, as they should. The core underlying metadata management system is what should be interoperable between different frontends, programs, and operating systems. A standard implementation for this should settle as development continues. This opens up the doors for improved and varied clients, integration with third-party applications, and more.
+3. **The application.** If nothing else, TagStudio the application serves as the first (and so far only) implementation for this system of metadata management. This has the responsibility of doing the idea justice and showing just what’s possible when it comes to user file management.
 
 ## FAQ
 
-### What State Is the Project Currently In?
+### Will TagStudio move, modify, or mess with my files?
 
-As of writing (Alpha v9.3.0) the project is in a useable state, however it lacks proper testing and quality of life features.
+**No**, outside of _explicit_ functionality such as "Move File(s) to Trash".
 
-### What Features Are You Planning on Adding?
+### Will TagStudio require me to recreate my tags or library in future updates?
 
-> [!IMPORTANT]
-> See the [Planned Features](/doc/updates/planned_features.md) documentation for the latest feature lists. The lists here are currently being migrated over there with individual pages for larger features.
+**No.** It's our highest priority to ensure that your data safely and smoothly transfers over to newer versions.
 
-Of the several features I have planned for the project, these are broken up into “priority” features and “future” features. Priority features were originally intended for the first public release, however are currently absent from the Alpha v9.x.x builds.
+### What state is the project currently in?
 
-#### Priority Features
+As of writing (Alpha v9.5.5) the project is very usable, however there's still some quirks and missing QoL features. Several additional features and changes are still planned (see: [roadmap](https://docs.tagstud.io/roadmap)) that add even more power and flexibility to the tagging and field systems while making it easier to tag in bulk and perform automated operations. Bugfixes and polishes are constantly trickling in along with the larger feature releases.
 
-- Improved search
-  - Sortable Search
-  - Boolean Search
-  - Coexisting Text + Tag Search
-  - Searchable File Metadata
-- Comprehensive Tag management tab
-- Easier ways to apply tags in bulk
-  - Tag Search Panel
-  - Recent Tags Panel
-  - Top Tags Panel
-  - Pinned Tags Panel
-- Better (stable, performant) library grid view
-- Improved entry relinking
-- Cached thumbnails
-- Tag-like Groups
-- Resizable thumbnail grid
-- User-defined metadata fields
-- Multiple directory support
-- SQLite (or similar) save files
-- Reading of EXIF and XMP fields
-- Improved UI/UX
-- Better internal API for accessing Entries, Tags, Fields, etc. from the library.
-- Proper testing workflow
-- Continued code cleanup and modularization
-- Exportable/importable library data including "Tag Packs"
+### What features are you planning on adding?
 
-#### Future Features
+See the [roadmap](https://docs.tagstud.io/roadmap) page for the core features being planned and implemented for TagStudio. For a more up to date look on what's currently being added for upcoming releases, see our GitHub [milestones](https://github.com/TagStudioDev/TagStudio/milestones) for versioned releases.
 
-- Support for multiple simultaneous users/clients
-- Draggable files outside the program
-- Comprehensive filetype whitelist
-- A finished “macro system” for automatic tagging based on predetermined criteria.
-- Different library views
-- Date and time fields
-- Entry linking/referencing
-- Audio waveform previews
-- 3D object previews
-- Additional previews for miscellaneous file types
-- Optional global tags and settings, spanning across libraries
-- Importing & exporting libraries to/from other programs
-- Port to a more performant language and modern frontend (Rust?, Tauri?, etc.)
-- Plugin system
-- Local OCR search
-- Support for local machine learning-based tag suggestions for images
-- Mobile version _(FAR future)_
+The most important remaining features before I consider the program to be "feature complete" are:
 
-#### Features I Likely Won’t Add/Pull
+- Custom names for Fields
+- List views for files
+- Multiple root directory support for libraries
+- Improved file entry relinking
+- File entry groups
+- Sorting by file date modified and created
+- Macros
+- Improved search bar with visualized tags and improved autocomplete
+- Side panel for easier tagging (pinned tags, recent tags, tag search, tag palette)
+- Improved tag management interface
+- Improved and finalized Tag Categories
+- Fixed and improved mixed entry data displays (see: [#337](https://github.com/TagStudioDev/TagStudio/issues/337))
+- Sharable tag data
+- Separate core library + API
+
+### What features will NOT be added?
 
 - Native Cloud Integration
-  - There are plenty of services already (native or third-party) that allow you to mount your cloud drives as virtual drives on your system. Pointing TagStudio to one of these mounts should function similarly to what native integration would look like.
-- Native ChatGPT/Non-Local LLM Integration
-  - This could mean different things depending on what you're intending. Whether it's trying to use an LLM to replace the native search, or to trying to use a model for image recognition, I'm not interested in hooking people's TagStudio libraries into non-local LLMs such as ChatGPT and/or turn the program into a "chatbot" interface (see: [Goals/Privacy](#goals)). I wouldn't, however, mind using **locally** hosted models to provide the _optional_ ability for additional searching and tagging methods (especially when it comes to facial recognition).
+    - There are plenty of services already (native or third-party) that allow you to mount your cloud drives as virtual drives on your system. Hosting a TagStudio library on one of these mounts should function similarly to what native integration would look like.
+    - Supporting native cloud integrations such as these would be an unnecessary "reinventing the wheel" burden for us that is outside the scope of this project.
+- Native ChatGPT/Claude/Gemini/_Non-Local_ LLM Integration
+    - This could mean different things depending on your intentions. Whether it's trying to use an LLM to replace the native search, or to trying to use a model for image recognition, I'm not interested in hooking people's TagStudio libraries into non-local LLMs such as ChatGPT and/or turn the program into a "chatbot" interface (see: [Overall Goals/Privacy](#overall-goals)).
+    - With that being said, the future TagStudio API should be well-suited to connect to any sort of service you'd like, including machine learning models if so you choose. I just won't _personally_ add any native integrations with online services.
 
-### Why Is the Version Already v9?
+### Is a Rust port coming?
 
-I’ve been developing this project over several years in private, and have gone through several major iterations and rewrites in that time. This “major version” is just a number at the end of the day, and if I wanted to I couldn’t released this as “Version 0” or “Version 1.0”, but I’ve decided to stick to my original version numbers to avoid needing to go in and change existing documentation and code comments. Version 10 is intended to include all of the “Priority Features” I’ve outlined in the [previous](#what-features-are-you-planning-on-adding) section. I’ve also labeled this version as an Alpha, and will likely reset the numbers when a feature-complete beta is reached.
+Not from us, or at least _not quite_. There are plans to break off the core TagStudio library into its own MIT-licensed module that can be used in other applications and plugins, and ideally this would be written in Rust. While I understand there's a lot of vocal support and volunteers willing to help with this, it's something that's better off coming at my/our own pace in order to ensure it's done correctly to align with the project's intentions and to remain maintainable in the future.
 
-### Wait, Is There a CLI Version?
+### Windows Defender thinks TagStudio is a virus or a trojan, why?
 
-As of right now, **no**. However, I _did_ have a CLI version in the recent past before dedicating my efforts to the Qt GUI version. I’ve left in the currently-inoperable CLI code just in case anyone was curious about it. Also yes, it’s just a bunch of glorified print statements (_the outlook for some form of curses on Windows didn’t look great at the time, and I just needed a driver for the newly refactored code...)._
+Unfortunately, executable Python applications "compiled" with something like PyInstaller are notorious for raising false positives in anti-virus software, most commonly Windows Defender (see: [#276](https://github.com/TagStudioDev/TagStudio/issues/276) and related issues). There's really not much we can do about this on our end, as the malware matches frequently change and sample submissions to Microsoft are slow and often ineffective. If you're effected by this, you may need to allow TagStudio to bypass your anti-virus software.
+
+### Why is TagStudio already on version 9.x?
+
+Over the first few years of private development the project went through several major iterations and rewrites. These major version bumps came quickly, and by the time TagStudio was opened-sourced the version number had already reached v9.0. Instead of resetting to "v0.0" or "v1.0" for this public release I decided to keep my v9.x numbering scheme and reserve v10.0 for when all the core features on the [roadmap](https://docs.tagstud.io/roadmap/) are implemented. I’ve also labeled this version as an "Alpha" and will drop this once either all of the core features are implemented or the project feels stable and feature-rich enough to be considered "Beta" and beyond.

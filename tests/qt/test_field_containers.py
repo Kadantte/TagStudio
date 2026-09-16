@@ -1,0 +1,210 @@
+# SPDX-FileCopyrightText: (c) TagStudio Contributors
+# SPDX-License-Identifier: GPL-3.0-only
+from collections.abc import Callable
+from pathlib import Path
+
+from tagstudio.core.library.alchemy.library import Library
+
+# pyright: reportPrivateUsage=false
+from tagstudio.core.library.alchemy.models import Entry, Tag
+from tagstudio.core.utils.types import unwrap
+from tagstudio.qt.controllers.inspector import Inspector
+from tagstudio.qt.qt_driver import QtDriver
+
+
+def test_update_selection_empty(qt_driver: QtDriver):
+    panel = Inspector(qt_driver)
+
+    # Clear the library selection (selecting 1 then unselecting 1)
+    qt_driver.toggle_item_selection(1, append=False, bridge=False)
+    qt_driver.toggle_item_selection(1, append=True, bridge=False)
+    panel.set_selection(qt_driver.selected)
+
+    # FieldContainer should hide all containers
+    for container in panel.containers._containers:
+        assert container.isHidden()
+
+
+def test_update_selection_single(qt_driver: QtDriver, entry_full: Entry):
+    panel = Inspector(qt_driver)
+
+    # Select the single entry
+    qt_driver.toggle_item_selection(entry_full.id, append=False, bridge=False)
+    panel.set_selection(qt_driver.selected)
+
+    # FieldContainer should show all applicable tags and field containers
+    for container in panel.containers._containers:
+        assert not container.isHidden()
+
+
+def test_update_selection_multiple(qt_driver: QtDriver):
+    # TODO: Implement mixed field editing. Currently these containers will be hidden,
+    # same as the empty selection behavior.
+    panel = Inspector(qt_driver)
+
+    # Select the multiple entries
+    qt_driver.toggle_item_selection(1, append=False, bridge=False)
+    qt_driver.toggle_item_selection(2, append=True, bridge=False)
+    panel.set_selection(qt_driver.selected)
+
+    # FieldContainer should show mixed field editing
+    for container in panel.containers._containers:
+        assert container.isHidden()
+
+
+def test_add_tag_to_selection_single(qt_driver: QtDriver, entry_full: Entry):
+    panel = Inspector(qt_driver)
+
+    assert {t.id for t in entry_full.tags} == {1000}
+
+    # Select the single entry
+    qt_driver.toggle_item_selection(entry_full.id, append=False, bridge=False)
+    panel.set_selection(qt_driver.selected)
+
+    # Add new tag
+    panel.containers.add_tags_to_selected(2000)
+
+    # Then reload entry
+    refreshed_entry: Entry = next(qt_driver.lib.all_entries(with_joins=True))
+    assert {t.id for t in refreshed_entry.tags} == {1000, 2000}
+
+
+def test_add_same_tag_to_selection_single(qt_driver: QtDriver, entry_full: Entry):
+    panel = Inspector(qt_driver)
+
+    assert {t.id for t in entry_full.tags} == {1000}
+
+    # Select the single entry
+    qt_driver.toggle_item_selection(entry_full.id, append=False, bridge=False)
+    panel.set_selection(qt_driver.selected)
+
+    # Add an existing tag
+    panel.containers.add_tags_to_selected(1000)
+
+    # Then reload entry
+    refreshed_entry = next(qt_driver.lib.all_entries(with_joins=True))
+    assert {t.id for t in refreshed_entry.tags} == {1000}
+
+
+def test_add_tag_to_selection_multiple(qt_driver: QtDriver):
+    panel = Inspector(qt_driver)
+    all_entries = qt_driver.lib.all_entries(with_joins=True)
+
+    # We want to verify that tag 1000 is on some, but not all entries already.
+    tag_present_on_some: bool = False
+    tag_absent_on_some: bool = False
+
+    for e in all_entries:
+        if 1000 in [t.id for t in e.tags]:
+            tag_present_on_some = True
+        else:
+            tag_absent_on_some = True
+
+    assert tag_present_on_some
+    assert tag_absent_on_some
+
+    # Select the multiple entries
+    for i, e in enumerate(qt_driver.lib.all_entries(with_joins=True), start=0):
+        qt_driver.toggle_item_selection(e.id, append=(True if i == 0 else False), bridge=False)  # noqa: SIM210
+    panel.set_selection(qt_driver.selected)
+
+    # Add new tag
+    panel.containers.add_tags_to_selected(1000)
+
+    # Then reload all entries and recheck the presence of tag 1000
+    refreshed_entries = qt_driver.lib.all_entries(with_joins=True)
+    tag_present_on_some = False
+    tag_absent_on_some = False
+
+    for e in refreshed_entries:
+        if 1000 in [t.id for t in e.tags]:
+            tag_present_on_some = True
+        else:
+            tag_absent_on_some = True
+
+    assert tag_present_on_some
+    assert not tag_absent_on_some
+
+
+def test_meta_tag_category(qt_driver: QtDriver, entry_full: Entry):
+    panel = Inspector(qt_driver)
+
+    # Ensure the Favorite tag is on entry_full
+    qt_driver.lib.add_tags_to_entries(1, entry_full.id)
+
+    # Select the single entry
+    qt_driver.toggle_item_selection(entry_full.id, append=False, bridge=False)
+    panel.set_selection(qt_driver.selected)
+
+    # FieldContainer should hide all containers
+    assert len(panel.containers._containers) == 3
+    for i, container in enumerate(panel.containers._containers):
+        match i:
+            case 0:
+                # Check if the container is the Meta Tags category
+                tag: Tag = unwrap(qt_driver.lib.get_tag(2))
+                assert container.title == f"<h4>{tag.name}</h4>"
+            case 1:
+                # Check if the container is the Tags category
+                assert container.title == "<h4>Tags</h4>"
+            case 2:
+                # Make sure the container isn't a duplicate Tags category
+                assert container.title != "<h4>Tags</h4>"
+            case _:
+                pass
+
+
+def test_custom_tag_category(qt_driver: QtDriver, entry_full: Entry):
+    panel = Inspector(qt_driver)
+
+    # Set tag 1000 (foo) as a category
+    tag: Tag = unwrap(qt_driver.lib.get_tag(1000))
+    tag.is_category = True
+    qt_driver.lib.update_tag(tag)
+
+    # Ensure the Favorite tag is on entry_full
+    qt_driver.lib.add_tags_to_entries(1, entry_full.id)
+
+    # Select the single entry
+    qt_driver.toggle_item_selection(entry_full.id, append=False, bridge=False)
+    panel.set_selection(qt_driver.selected)
+
+    # FieldContainer should hide all containers
+    assert len(panel.containers._containers) == 3
+    for i, container in enumerate(panel.containers._containers):
+        match i:
+            case 0:
+                # Check if the container is the Meta Tags category
+                tag_2: Tag = unwrap(qt_driver.lib.get_tag(2))
+                assert container.title == f"<h4>{tag_2.name}</h4>"
+            case 1:
+                # Check if the container is the custom "foo" category
+                assert container.title == f"<h4>{tag.name}</h4>"
+            case 2:
+                # Make sure the container isn't a plain Tags category
+                assert container.title != "<h4>Tags</h4>"
+            case _:
+                pass
+
+
+def test_exclude_tag_category(
+    qt_driver: QtDriver, library: Library, generate_tag: Callable[..., Tag]
+):
+    panel = Inspector(qt_driver)
+
+    category_parent = unwrap(generate_tag("category_parent", id=123, is_category=True))
+    library.add_tag(category_parent)
+
+    tag = unwrap(generate_tag("tag", id=124))
+    library.add_tag(tag, parent_ids={category_parent.id}, exclusion_ids={category_parent.id})
+
+    entry = Entry(id=777, path=Path("test.txt"), fields=[])
+
+    library.add_entries([entry])
+    library.add_tags_to_entries(entry.id, tag.id)
+
+    qt_driver.toggle_item_selection(entry.id, append=False, bridge=False)
+    panel.set_selection(qt_driver.selected)
+
+    assert len(panel.containers._containers) == 1
+    assert panel.containers._containers[0].title == "<h4>Tags</h4>"

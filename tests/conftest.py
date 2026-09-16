@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: (c) TagStudio Contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
+# pyright: reportPrivateUsage=false
+# pyright: reportUnusedFunction=false
+
+
+import sys
+from collections.abc import Callable, Generator
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import Mock, patch
+
+import pytest
+from PySide6.QtWidgets import QScrollArea
+from pytestqt.qtbot import QtBot
+
+from tagstudio.core.library.alchemy.fields import TextField
+from tagstudio.core.media_types import MediaTypes
+
+CWD = Path(__file__).parent
+# this needs to be above `src` imports
+sys.path.insert(0, str(CWD.parent))
+
+from tagstudio.core.constants import THUMB_CACHE_NAME, TS_FOLDER_NAME
+from tagstudio.core.library.alchemy.library import Library
+from tagstudio.core.library.alchemy.models import Entry, Tag
+from tagstudio.qt.qt_driver import QtDriver
+from tagstudio.qt.views.layouts.thumb_grid_layout import ThumbGridLayout
+
+
+@pytest.fixture
+def cwd():
+    return CWD
+
+
+@pytest.fixture
+def file_mediatypes_library():
+    lib = Library()
+
+    status = lib.open_library(Path(""), in_memory=True)
+    assert status.success
+
+    entry1 = Entry(
+        path=Path("foo.png"),
+        fields=[TextField(name="Title", value="I'm a Test Title")],
+    )
+
+    entry2 = Entry(
+        path=Path("bar.png"),
+        fields=[TextField(name="Title", value="I'm a Test Title")],
+    )
+
+    entry3 = Entry(
+        path=Path("baz.apng"),
+        fields=[TextField(name="Title", value="I'm a Test Title")],
+    )
+
+    assert lib.add_entries([entry1, entry2, entry3])
+    assert len(lib.tags) == 3
+
+    return lib
+
+
+@pytest.fixture(scope="session")
+def library_dir():
+    """Creates a shared library path for tests, that cleans up after the session."""
+    with TemporaryDirectory() as tmp_dir_name:
+        library_path = Path(tmp_dir_name)
+
+        thumbs_path = library_path / TS_FOLDER_NAME / THUMB_CACHE_NAME
+        thumbs_path.mkdir(parents=True, exist_ok=True)
+
+        yield library_path
+
+
+@pytest.fixture
+def library(request, library_dir: Path):  # pyright: ignore
+    # when no param is passed, use the default
+    library_path = library_dir
+    if hasattr(request, "param"):
+        if isinstance(request.param, TemporaryDirectory):
+            library_path = Path(request.param.name)  # pyright: ignore[reportArgumentType]
+        else:
+            library_path = Path(request.param)
+
+    lib = Library()
+    status = lib.open_library(library_path, in_memory=True)
+    assert status.success
+
+    tag = Tag(
+        name="foo",
+        color_namespace="tagstudio-standard",
+        color_slug="red",
+    )
+    assert lib.add_tag(tag)
+
+    parent_tag = Tag(
+        id=1500,
+        name="subbar",
+        color_namespace="tagstudio-standard",
+        color_slug="yellow",
+    )
+    assert lib.add_tag(parent_tag)
+
+    tag2 = Tag(
+        id=2000,
+        name="bar",
+        color_namespace="tagstudio-standard",
+        color_slug="blue",
+        parent_tags={parent_tag},
+    )
+    assert lib.add_tag(tag2)
+
+    # default item with deterministic name
+    entry = Entry(
+        id=1,
+        path=Path("foo.txt"),
+        fields=[TextField(name="Title", value="I'm a Test Title")],
+    )
+    assert lib.add_tags_to_entries(entry.id, tag.id)
+
+    entry2 = Entry(
+        id=2,
+        path=Path("one/two/bar.md"),
+        fields=[TextField(name="Title", value="I'm a Test Title")],
+    )
+    assert lib.add_tags_to_entries(entry2.id, tag2.id)
+
+    assert lib.add_entries([entry, entry2])
+    assert len(lib.tags) == 6
+
+    yield lib
+
+
+@pytest.fixture
+def search_library() -> Library:
+    lib = Library()
+    status = lib.open_library(Path(CWD / "fixtures" / "search_library"))
+    assert status.success
+    return lib
+
+
+@pytest.fixture
+def entry_min(library: Library):
+    yield next(library.all_entries())
+
+
+@pytest.fixture
+def entry_full(library: Library):
+    yield next(library.all_entries(with_joins=True))
+
+
+@pytest.fixture(autouse=True)
+def _init_qtbot(qtbot: QtBot):
+    """Ensures that a QtBot is initialized for all subsequent tests, regardless of order."""
+    return qtbot
+
+
+@pytest.fixture(autouse=True)
+def _reset_media_types():
+    """Snapshot the MediaTypes state before each test, then restore it after."""
+    pre_snapshop = MediaTypes._snapshot()
+
+    yield
+
+    post_snapshop = MediaTypes._snapshot()
+
+    if pre_snapshop != post_snapshop:
+        MediaTypes._restore(pre_snapshop)
+        assert pre_snapshop == MediaTypes._snapshot(), "The MediaTypes state was not restored!"
+
+
+@pytest.fixture
+def qt_driver(library: Library, library_dir: Path):
+    class Args:
+        settings_file = library_dir / "settings.toml"
+        cache_file = library_dir / "tagstudio.ini"
+        open = library_dir
+        ci = True
+
+    # NOTE: What the heck is this
+    with patch("tagstudio.qt.qt_driver.Consumer"), patch("tagstudio.qt.qt_driver.CustomRunnable"):
+        driver = QtDriver(Args())  # pyright: ignore[reportArgumentType]
+
+        driver.app = Mock()
+        driver.main_window = Mock()
+        driver.main_window.thumb_size = 128
+        driver.main_window.thumb_layout = ThumbGridLayout(driver, QScrollArea())
+        driver.main_window.menu_bar.autofill_action = Mock()
+
+        driver.copy_buffer = {"fields": [], "tags": []}
+
+        driver.lib = library
+        # TODO - downsize this method and use it
+        # driver.start()
+        driver.frame_content = [e.id for e in library.all_entries()]
+        yield driver
+
+
+@pytest.fixture
+def generate_tag() -> Generator[Callable[..., Tag]]:
+    def inner(name: str, **kwargs) -> Tag:  # pyright: ignore
+        params = dict(name=name, color_namespace="tagstudio-standard", color_slug="red") | kwargs
+        return Tag(**params)  # pyright: ignore[reportArgumentType]
+
+    yield inner

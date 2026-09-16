@@ -1,0 +1,198 @@
+{
+    "about_bg": {
+        "mode": "qpixmap",
+        "path": "qt/images/about_bg.jpg"
+    },
+    "adobe_illustrator": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/adobe_illustrator.png"
+    },
+    "adobe_photoshop": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/adobe_photoshop.png"
+    },
+    "affinity_photo": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/affinity_photo.png"
+    },
+    "alert": {
+        "mode": "qpixmap",
+        "path": "qt/images/alert.png"
+    },
+    "archive": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/archive.png"
+    },
+    "audio": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/audio.png"
+    },
+    "broken_link_icon": {
+        "mode": "pil",
+        "path": "qt/images/broken_link_icon.png"
+    },
+    "bxs_left_arrow": {
+        "mode": "pil",
+        "path": "qt/images/bxs-left-arrow.png"
+    },
+    "bxs_right_arrow": {
+        "mode": "pil",
+        "path": "qt/images/bxs-right-arrow.png"
+    },
+    "copy": {
+        "mode": "pil",
+        "path": "qt/images/bxs-clipboard-regular.png"
+    },
+    "database": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/database.png"
+    },
+    "document": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/document.png"
+    },
+    "dupe_file_stat": {
+        "mode": "pil",
+        "path": "qt/images/dupe_file_stat.png"
+    },
+    "ebook": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/ebook.png"
+    },
+    "edit": {
+        "mode": "pil",
+        "path": "qt/images/bxs-pencil-solid.png"
+    },
+    "file_generic": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/file_generic.png"
+    },
+    "font": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/font.png"
+    },
+    "hint_field_add": {
+        "mode": "pil",
+        "path": "qt/images/hint_field_add.png"
+    },
+    "hint_field_create": {
+        "mode": "pil",
+        "path": "qt/images/hint_field_create.png"
+    },
+    "hint_tag_add": {
+        "mode": "pil",
+        "path": "qt/images/hint_tag_add.png"
+    },
+    "hint_tag_added": {
+        "mode": "pil",
+        "path": "qt/images/hint_tag_added.png"
+    },
+    "hint_tag_create": {
+        "mode": "pil",
+        "path": "qt/images/hint_tag_create.png"
+    },
+    "icon": {
+        "mode": "pil",
+        "path": "icon.png"
+    },
+    "ignored": {
+        "mode": "pil",
+        "path": "qt/images/ignored_128.png"
+    },
+    "ignored_stat": {
+        "mode": "pil",
+        "path": "qt/images/ignored_stat.png"
+    },
+    "image": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/image.png"
+    },
+    "image_vector": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/image_vector.png"
+    },
+    "material": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/material.png"
+    },
+    "model": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/model.png"
+    },
+    "mute_icon": {
+        "mode": "pil",
+        "path": "qt/images/bxs-volume-mute-solid.png"
+    },
+    "pause_icon": {
+        "mode": "pil",
+        "path": "qt/images/pause.png"
+    },
+    "presentation": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/presentation.png"
+    },
+    "program": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/program.png"
+    },
+    "shader": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/shader.png"
+    },
+    "shortcut": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/shortcut.png"
+    },
+    "splash_95": {
+        "mode": "qpixmap",
+        "path": "qt/images/splash/95.png"
+    },
+    "splash_aurora": {
+        "mode": "qpixmap",
+        "path": "qt/images/splash/aurora.png"
+    },
+    "splash_classic": {
+        "mode": "qpixmap",
+        "path": "qt/images/splash/classic.png"
+    },
+    "splash_goo_gears": {
+        "mode": "qpixmap",
+        "path": "qt/images/splash/goo_gears.png"
+    },
+    "spreadsheet": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/spreadsheet.png"
+    },
+    "plaintext": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/text.png"
+    },
+    "thumb_loading": {
+        "mode": "pil",
+        "path": "qt/images/thumb_loading.png"
+    },
+    "trash": {
+        "mode": "pil",
+        "path": "qt/images/bxs-trash-solid.png"
+    },
+    "ts_logo_text_color": {
+        "mode": "pil",
+        "path": "qt/images/tagstudio_logo-text_color.png"
+    },
+    "ts_logo_text_mono": {
+        "mode": "pil",
+        "path": "qt/images/tagstudio_logo-text_mono.png"
+    },
+    "unlinked_stat": {
+        "mode": "pil",
+        "path": "qt/images/unlinked_stat.png"
+    },
+    "video": {
+        "mode": "pil",
+        "path": "qt/images/file_icons/video.png"
+    },
+    "volume_icon": {
+        "mode": "pil",
+        "path": "qt/images/bxs-volume-full-solid.png"
+    }
+}

@@ -1,0 +1,1862 @@
+# SPDX-FileCopyrightText: (c) TagStudio Contributors
+# SPDX-License-Identifier: GPL-3.0-only
+
+
+import re
+import shutil
+import sys
+import time
+import unicodedata
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from os import makedirs
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import structlog
+from humanfriendly import format_timespan  # pyright: ignore[reportUnknownVariableType]
+from sqlalchemy import (
+    URL,
+    ColumnExpressionArgument,
+    Engine,
+    NullPool,
+    ScalarResult,
+    Update,
+    and_,
+    asc,
+    create_engine,
+    delete,
+    desc,
+    exists,
+    func,
+    inspect,
+    or_,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.dialects import sqlite
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import (
+    InstanceState,
+    Session,
+    contains_eager,
+    joinedload,
+    make_transient,
+    noload,
+    selectinload,
+)
+
+from tagstudio.core.constants import (
+    BACKUP_FOLDER_NAME,
+    IGNORE_NAME,
+    LEGACY_TAG_FIELD_IDS,
+    RESERVED_NAMESPACE_PREFIX,
+    RESERVED_TAG_END,
+    RESERVED_TAG_START,
+    TAG_ARCHIVED,
+    TAG_FAVORITE,
+    TAG_META,
+    TS_FOLDER_NAME,
+)
+from tagstudio.core.library.alchemy import default_color_groups
+from tagstudio.core.library.alchemy.constants import (
+    DB_VERSION,
+    DB_VERSION_CURRENT_KEY,
+    DB_VERSION_INITIAL_KEY,
+    DEFAULT_FIELD_TEMPLATES,
+    JSON_FILENAME,
+    SQL_FILENAME,
+    TAG_CHILDREN_QUERY,
+)
+from tagstudio.core.library.alchemy.db import Base as ModelBase
+from tagstudio.core.library.alchemy.enums import MAX_SQL_VARIABLES, BrowsingState, SortingModeEnum
+from tagstudio.core.library.alchemy.fields import (
+    LEGACY_FIELD_MAP,
+    BaseField,
+    BaseFieldTemplate,
+    DatetimeField,
+    DatetimeFieldTemplate,
+    TextField,
+    TextFieldTemplate,
+)
+from tagstudio.core.library.alchemy.joins import CategoryExclusion, TagEntry, TagParent
+from tagstudio.core.library.alchemy.migrations import DBMigrations, MigrationError
+from tagstudio.core.library.alchemy.models import (
+    Entry,
+    Namespace,
+    Tag,
+    TagAlias,
+    TagColorGroup,
+    Version,
+)
+from tagstudio.core.library.alchemy.visitors import SQLBoolExpressionBuilder
+from tagstudio.core.library.ignore import migrate_ext_list
+from tagstudio.core.library.json.library import Library as JsonLibrary
+from tagstudio.core.utils.types import unwrap
+
+if TYPE_CHECKING:
+    from sqlalchemy import Select
+
+
+logger = structlog.get_logger(__name__)
+
+
+class ReservedNamespaceError(Exception):
+    """Raise during an unauthorized attempt to create or modify a reserved namespace value.
+
+    Reserved namespace prefix: "tagstudio".
+    """
+
+    pass
+
+
+def slugify(input_string: str, allow_reserved: bool = False) -> str:
+    # Convert to lowercase and normalize unicode characters
+    slug = unicodedata.normalize("NFKD", input_string.lower())
+
+    # Remove non-word characters (except hyphens and spaces)
+    slug = re.sub(r"[^\w\s-]", "", slug).strip()
+
+    # Replace spaces with hyphens
+    slug = re.sub(r"[-\s]+", "-", slug)
+
+    if not allow_reserved and slug.startswith(RESERVED_NAMESPACE_PREFIX):
+        raise ReservedNamespaceError
+
+    return slug
+
+
+def get_default_tags() -> tuple[Tag, ...]:
+    """Return the built-in tags for a new TagStudio library."""
+    meta_tag = Tag(
+        id=TAG_META,
+        name="Meta Tags",
+        aliases={TagAlias(name="Meta"), TagAlias(name="Meta Tag")},
+        is_category=True,
+    )
+    archive_tag = Tag(
+        id=TAG_ARCHIVED,
+        name="Archived",
+        aliases={TagAlias(name="Archive")},
+        parent_tags={meta_tag},
+        is_hidden=True,
+        color_slug="red",
+        color_namespace="tagstudio-standard",
+    )
+    favorite_tag = Tag(
+        id=TAG_FAVORITE,
+        name="Favorite",
+        aliases={
+            TagAlias(name="Favorited"),
+            TagAlias(name="Favorites"),
+        },
+        parent_tags={meta_tag},
+        color_slug="yellow",
+        color_namespace="tagstudio-standard",
+    )
+
+    return archive_tag, favorite_tag, meta_tag
+
+
+# The difference in the number of default JSON tags vs default tags in the current version.
+DEFAULT_TAG_DIFF: int = len(get_default_tags()) - len([TAG_ARCHIVED, TAG_FAVORITE])
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """Wrapper for search results.
+
+    Attributes:
+        total_count(int): total number of items for given query, might be different than len(items).
+        ids(list[int]): for current page (size matches filter.page_size).
+    """
+
+    total_count: int
+    ids: list[int]
+
+    def __bool__(self) -> bool:
+        """Boolean evaluation for the wrapper.
+
+        :return: True if there are ids in the result.
+        """
+        return self.total_count > 0
+
+    def __len__(self) -> int:
+        """Return the total number of ids in the result."""
+        return len(self.ids)
+
+    def __getitem__(self, index: int) -> int:
+        """Allow to access ids via index directly on the wrapper."""
+        return self.ids[index]
+
+
+@dataclass
+class LibraryStatus:
+    """Keep status of library opening operation."""
+
+    success: bool
+    library_path: Path | None = None
+    message: str | None = None
+    msg_description: str | None = None
+    json_migration_req: bool = False
+
+
+class Library:
+    """Class for the Library object, and all CRUD operations made upon it."""
+
+    library_dir: Path | None = None
+    engine: Engine | None = None
+    included_files: set[Path] = set()
+
+    def __init__(self) -> None:
+        self.dupe_entries_count: int = -1  # NOTE: For internal management.
+        self.dupe_files_count: int = -1
+        self.ignored_entries_count: int = -1
+        self.unlinked_entries_count: int = -1
+
+    def close(self):
+        if self.engine:
+            self.engine.dispose()
+        self.library_dir = None
+        self.folder = None
+        self.included_files = set()
+
+        self.dupe_entries_count = -1
+        self.dupe_files_count = -1
+        self.ignored_entries_count = -1
+        self.unlinked_entries_count = -1
+
+    def migrate_json_to_sqlite(self, json_lib: JsonLibrary):
+        """Migrate JSON library data to the SQLite database."""
+        logger.info("Starting Library Conversion...")
+        start_time = time.time()
+
+        # Tags
+        for tag in json_lib.tags:
+            color_namespace, color_slug = default_color_groups.json_to_sql_color(tag.color)
+            disambiguation_id: int | None = None
+            if tag.subtag_ids and tag.subtag_ids[0] != tag.id:
+                disambiguation_id = tag.subtag_ids[0]
+            self.add_tag(
+                Tag(
+                    id=tag.id,
+                    name=tag.name,
+                    shorthand=tag.shorthand,
+                    color_namespace=color_namespace,
+                    color_slug=color_slug,
+                    disambiguation_id=disambiguation_id,
+                )
+            )
+            # Apply user edits to built-in JSON tags.
+            if tag.id in range(RESERVED_TAG_START, RESERVED_TAG_END + 1):
+                updated_tag = self.get_tag(tag.id)
+                if not updated_tag:
+                    continue
+                updated_tag.name = tag.name
+                updated_tag.shorthand = tag.shorthand
+                updated_tag.color_namespace = color_namespace
+                updated_tag.color_slug = color_slug
+                self.update_tag(updated_tag)  # NOTE: This just calls add_tag?
+
+        # Tag Aliases
+        for tag in json_lib.tags:
+            for alias in tag.aliases:
+                if not alias:
+                    break
+                # Only add new (user-created) aliases to the default tags.
+                # This prevents pre-existing built-in aliases from being added as duplicates.
+                if tag.id in range(RESERVED_TAG_START, RESERVED_TAG_END + 1):
+                    for dt in get_default_tags():
+                        if dt.id == tag.id and alias not in dt.alias_strings:
+                            self.add_alias(name=alias, tag_id=tag.id)
+                else:
+                    self.add_alias(name=alias, tag_id=tag.id)
+
+        # Parent Tags (Previously known as "Subtags" in JSON)
+        for tag in json_lib.tags:
+            for parent_id in tag.subtag_ids:
+                self.add_parent_tag(parent_id=parent_id, child_id=tag.id)
+
+        # Entries
+        self.add_entries(
+            [
+                Entry(
+                    path=entry.path / entry.filename,
+                    fields=[],
+                    id=entry.id + 1,  # NOTE: JSON IDs start at 0 instead of 1
+                    date_added=datetime.now(),
+                )
+                for entry in json_lib.entries
+            ]
+        )
+
+        for entry in json_lib.entries:
+            for field in entry.fields:  # pyright: ignore[reportUnknownVariableType]
+                for legacy_field_id, value in field.items():  # pyright: ignore[reportUnknownVariableType]
+                    # Old tag fields get added as tags
+                    if legacy_field_id in LEGACY_TAG_FIELD_IDS:
+                        self.add_tags_to_entries(entry_ids=entry.id + 1, tag_ids=value)
+                    else:
+                        try:
+                            # NOTE: JSON IDs start at 0 instead of 1
+                            field_info = LEGACY_FIELD_MAP[legacy_field_id]
+                            if field_info["type"] == TextField:
+                                text_field = TextField(
+                                    name=str(field_info["name"]),
+                                    value=value,
+                                    is_multiline=bool(field_info["is_multiline"]),
+                                )
+                                self.add_field_to_entries(
+                                    entry_ids=(entry.id + 1), field=text_field
+                                )
+                            elif field_info["type"] == DatetimeField:
+                                datetime_field = DatetimeField(
+                                    name=str(field_info["name"]), value=value
+                                )
+                                self.add_field_to_entries(
+                                    entry_ids=(entry.id + 1), field=datetime_field
+                                )
+                        except Exception as e:
+                            logger.error(
+                                "[Library][JSON Migration] Error reading field",
+                                error=e,
+                                entry_id=entry.id + 1,
+                                legacy_field_id=legacy_field_id,
+                                value=value,
+                            )
+
+        # extension include/exclude list
+        (unwrap(self.library_dir) / TS_FOLDER_NAME / IGNORE_NAME).write_text(
+            migrate_ext_list([x.strip(".") for x in json_lib.ext_list], json_lib.is_exclude_list)
+        )
+
+        end_time = time.time()
+        logger.info(f"Library Converted! ({format_timespan(end_time - start_time)})")
+
+    def tag_display_name(self, tag: Tag | None) -> str:
+        if not tag:
+            return "<NO TAG>"
+
+        if tag.disambiguation_id:
+            with Session(self.engine) as session:
+                disam_tag = session.scalar(select(Tag).where(Tag.id == tag.disambiguation_id))
+                if not disam_tag:
+                    return "<NO DISAM TAG>"
+                disam_name = disam_tag.shorthand
+                if not disam_name:
+                    disam_name = disam_tag.name
+                return f"{tag.name} ({disam_name})"
+        else:
+            return tag.name
+
+    def open_library(self, library_dir: Path, in_memory: bool = False) -> LibraryStatus:
+        """Wrapper for open_sqlite_library and create_sqlite_library.
+
+        Handles in-memory storage and checks whether a JSON-migration is necessary.
+        """
+        assert isinstance(library_dir, Path)
+
+        sql_path = library_dir / TS_FOLDER_NAME / SQL_FILENAME
+        json_path = library_dir / TS_FOLDER_NAME / JSON_FILENAME
+
+        is_new = not sql_path.exists()
+        if not in_memory:
+            self.verify_ts_folder(library_dir)  # ensure .TagStudio directory exists
+            if is_new and json_path.exists():
+                return LibraryStatus(
+                    success=False,
+                    library_path=library_dir,
+                    message="[JSON] Legacy v9.4 library requires conversion to v9.5+",
+                    json_migration_req=True,
+                )
+
+        if is_new:
+            return self.create_sqlite_library(library_dir, in_memory)
+
+        return self.open_sqlite_library(library_dir, in_memory)
+
+    @staticmethod
+    def __get_engine(library_dir: Path, in_memory: bool, sql_filename: str):
+        connection_string = URL.create(
+            drivername="sqlite",
+            database=(
+                ":memory:" if in_memory else str(library_dir / TS_FOLDER_NAME / sql_filename)
+            ),
+        )
+        # NOTE: File-based databases should use NullPool to create new DB connection in order to
+        # keep connections on separate threads, which prevents the DB files from being locked
+        # even after a connection has been closed.
+        # SingletonThreadPool (the default for :memory:) should still be used for in-memory DBs.
+        # More info can be found on the SQLAlchemy docs:
+        # https://docs.sqlalchemy.org/en/20/changelog/migration_07.html
+        # Under -> sqlite-the-sqlite-dialect-now-uses-nullpool-for-file-based-databases
+        poolclass = None if in_memory else NullPool
+
+        logger.info(
+            "[Library] Creating SQLAlchemy Engine",
+            connection_string=connection_string,
+            poolclass=poolclass,
+        )
+        return create_engine(
+            connection_string, poolclass=poolclass, connect_args={"autocommit": False}
+        )
+
+    def create_sqlite_library(
+        self, library_dir: Path, in_memory: bool, sql_filename: str = SQL_FILENAME
+    ) -> LibraryStatus:
+        self.engine = self.__get_engine(library_dir, in_memory, sql_filename)
+
+        logger.info(
+            "[Library] Opening SQLite Library",
+            library_dir=library_dir,
+        )
+
+        logger.info("[Library] Creating DB tables...")
+        with self.engine.connect() as conn:
+            ModelBase.metadata.create_all(conn)
+            conn.commit()
+
+            # TODO - find a better way
+            # is this the better way?
+            # Could we perhaps update the row we are reading from here?
+            result = conn.execute(text("SELECT SEQ FROM sqlite_sequence WHERE name='tags'"))
+            autoincrement_val = result.scalar()
+            if not autoincrement_val or autoincrement_val <= RESERVED_TAG_END:
+                try:
+                    conn.execute(
+                        text(
+                            "INSERT INTO tags "
+                            "(id, name, color_namespace, color_slug, is_category, is_hidden) "
+                            f"VALUES ({RESERVED_TAG_END}, 'temp', NULL, NULL, false, false)"
+                        )
+                    )
+                    conn.execute(text(f"DELETE FROM tags WHERE id = {RESERVED_TAG_END}"))
+                    conn.commit()
+                except OperationalError as e:
+                    logger.error("Could not initialize built-in tags", error=e)
+                    conn.rollback()
+
+        with Session(self.engine) as session:
+            # Add default tag color namespaces.
+            namespaces = default_color_groups.namespaces()
+
+            session.add_all(namespaces)
+            session.flush()
+
+            # Add default tag colors.
+            tag_colors: list[TagColorGroup] = default_color_groups.standard()
+            tag_colors += default_color_groups.pastels()
+            tag_colors += default_color_groups.shades()
+            tag_colors += default_color_groups.grayscale()
+            tag_colors += default_color_groups.earth_tones()
+            tag_colors += default_color_groups.neon()
+
+            session.add_all(tag_colors)
+            session.flush()
+
+            # Add default tags.
+            session.add_all(get_default_tags())
+            session.flush()
+
+            # Add default field templates
+            for template in DEFAULT_FIELD_TEMPLATES:
+                session.add(template)
+            session.flush()
+
+            # Ensure version rows are present
+            session.add(Version(key=DB_VERSION_INITIAL_KEY, value=DB_VERSION))
+            session.add(Version(key=DB_VERSION_CURRENT_KEY, value=DB_VERSION))
+            session.flush()
+
+            # Generate default .ts_ignore file
+            try:
+                ts_ignore_template = (
+                    Path(__file__).parents[3] / "resources/templates/ts_ignore_template.txt"
+                )
+                shutil.copy2(ts_ignore_template, library_dir / TS_FOLDER_NAME / IGNORE_NAME)
+            except Exception as e:
+                logger.error("[ERROR][Library] Could not generate '.ts_ignore' file!", error=e)
+
+            session.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_tags_name_shorthand ON tags (name, shorthand)")
+            )
+            session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_tag_parents_child_id ON tag_parents (child_id)"
+                )
+            )
+            session.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_tag_entries_entry_id ON tag_entries (entry_id)"
+                )
+            )
+
+            session.commit()
+
+        # everything is fine, set the library path
+        self.library_dir = library_dir
+        return LibraryStatus(success=True, library_path=library_dir)
+
+    def open_sqlite_library(
+        self, library_dir: Path, in_memory: bool, sql_filename: str = SQL_FILENAME
+    ) -> LibraryStatus:
+        logger.info("[Library] Opening SQLite Library", library_dir=library_dir)
+
+        # migrate if necessary
+        try:
+            with DBMigrations(library_dir, sql_filename) as migrations:
+                # save backup if patches will be applied
+                if migrations.required:
+                    Library.save_library_backup_to_disk(library_dir)
+
+                migrations.run()
+        except MigrationError as e:
+            return LibraryStatus(success=False, message=e.args[0])
+
+        # open up-to-date library
+        self.engine = self.__get_engine(library_dir, in_memory, sql_filename)
+        self.library_dir = library_dir
+        return LibraryStatus(success=True, library_path=library_dir)
+
+    @property
+    def field_templates(self) -> Sequence[BaseFieldTemplate]:
+        with Session(self.engine) as session:
+            text_templates = list(session.scalars(select(TextFieldTemplate)))
+            datetime_templates = list(session.scalars(select(DatetimeFieldTemplate)))
+            return text_templates + datetime_templates
+
+    def get_entry(self, entry_id: int) -> Entry | None:
+        """Load entry without joins."""
+        with Session(self.engine) as session:
+            entry = session.scalar(select(Entry).where(Entry.id == entry_id))
+            if not entry:
+                return None
+            session.expunge(entry)
+            make_transient(entry)
+            return entry
+
+    def get_entry_full(
+        self, entry_id: int, with_fields: bool = True, with_tags: bool = True
+    ) -> Entry | None:
+        """Load entry and join with all joins and all tags."""
+        # NOTE: TODO: Currently this method makes multiple separate queries to the db and combines
+        # those into a final Entry object (if using "with" args). This was done due to it being
+        # much more efficient than the existing join query, however there likely exists a single
+        # query that can accomplish the same task without exhibiting the same slowdown.
+        with Session(self.engine) as session:
+            tags: set[Tag] | None = None
+            tag_stmt: Select[tuple[Tag]]
+            entry_stmt = select(Entry).where(Entry.id == entry_id).limit(1)
+            if with_fields:
+                entry_stmt = (
+                    entry_stmt.outerjoin(Entry.text_fields)
+                    .outerjoin(Entry.datetime_fields)
+                    .options(
+                        selectinload(Entry.text_fields),
+                        selectinload(Entry.datetime_fields),
+                    )
+                )
+            # if with_tags:
+            #     entry_stmt = entry_stmt.outerjoin(Entry.tags).options(selectinload(Entry.tags))
+            if with_tags:
+                tag_stmt = select(Tag).where(
+                    and_(
+                        TagEntry.tag_id == Tag.id,
+                        TagEntry.entry_id == entry_id,
+                    )
+                )
+
+            start_time = time.time()
+            entry = session.scalar(entry_stmt)
+            if with_tags:
+                tags = set(session.scalars(tag_stmt))  # pyright: ignore[reportPossiblyUnboundVariable]
+            end_time = time.time()
+            logger.info(
+                f"[Library] Time it took to get entry: "
+                f"{format_timespan(end_time - start_time, max_units=5)}",
+                with_fields=with_fields,
+                with_tags=with_tags,
+            )
+            if not entry:
+                return None
+            session.expunge(entry)
+            make_transient(entry)
+
+            # Recombine the separately queried tags with the base entry object.
+            if with_tags and tags:
+                entry.tags = tags
+            return entry
+
+    def get_entries(self, entry_ids: Iterable[int]) -> list[Entry]:
+        with Session(self.engine) as session:
+            statement = select(Entry).where(Entry.id.in_(entry_ids))
+            entries = dict((e.id, e) for e in session.scalars(statement))
+            return [entries[id] for id in entry_ids]
+
+    def get_entries_full(self, entry_ids: list[int] | set[int]) -> Iterator[Entry]:
+        """Load entry and join with all joins and all tags."""
+        with Session(self.engine) as session:
+            statement = select(Entry).where(Entry.id.in_(set(entry_ids)))
+            statement = (
+                statement.outerjoin(Entry.text_fields)
+                .outerjoin(Entry.datetime_fields)
+                .outerjoin(Entry.tags)
+            )
+            statement = statement.options(
+                selectinload(Entry.text_fields),
+                selectinload(Entry.datetime_fields),
+                selectinload(Entry.tags).options(
+                    selectinload(Tag.aliases),
+                    selectinload(Tag.parent_tags),
+                ),
+            )
+            statement = statement.distinct()
+            entries: ScalarResult[Entry] | list[Entry] = session.execute(statement).scalars()
+            entries = entries.unique()
+
+            entry_order_dict = {e_id: order for order, e_id in enumerate(entry_ids)}
+            entries = sorted(entries, key=lambda e: entry_order_dict[e.id])
+
+            for entry in entries:
+                yield entry
+                session.expunge(entry)
+
+    def get_entry_full_by_path(self, path: Path) -> Entry | None:
+        """Get the entry with the corresponding path."""
+        with Session(self.engine) as session:
+            stmt = select(Entry).where(Entry.path == path)
+            stmt = (
+                stmt.outerjoin(Entry.text_fields)
+                .outerjoin(Entry.datetime_fields)
+                .options(selectinload(Entry.text_fields), selectinload(Entry.datetime_fields))
+            )
+            stmt = (
+                stmt.outerjoin(Entry.tags)
+                .outerjoin(TagAlias)
+                .options(
+                    selectinload(Entry.tags).options(
+                        joinedload(Tag.aliases),
+                        joinedload(Tag.parent_tags),
+                    )
+                )
+            )
+            entry = session.scalar(stmt)
+            if not entry:
+                return None
+            session.expunge(entry)
+            make_transient(entry)
+            return entry
+
+    def get_tag_entries(
+        self, tag_ids: Iterable[int], entry_ids: Iterable[int]
+    ) -> dict[int, set[int]]:
+        """Returns a dict of tag_id->(entry_ids with tag_id)."""
+        tag_entries: dict[int, set[int]] = dict((id, set()) for id in tag_ids)
+        with Session(self.engine) as session:
+            statement = select(TagEntry).where(
+                and_(TagEntry.tag_id.in_(tag_ids), TagEntry.entry_id.in_(entry_ids))
+            )
+            for tag_entry in session.scalars(statement).fetchall():
+                tag_entries[tag_entry.tag_id].add(tag_entry.entry_id)
+        return tag_entries
+
+    @property
+    def entries_count(self) -> int:
+        with Session(self.engine) as session:
+            return unwrap(session.scalar(select(func.count(Entry.id))))
+
+    def all_entries(self, with_joins: bool = False) -> Iterator[Entry]:
+        """Load entries without joins."""
+        with Session(self.engine) as session:
+            stmt = select(Entry)
+            if with_joins:
+                # load Entry with all joins and all tags
+                stmt = (
+                    stmt.outerjoin(Entry.text_fields)
+                    .outerjoin(Entry.datetime_fields)
+                    .outerjoin(Entry.tags)
+                )
+                stmt = stmt.options(
+                    contains_eager(Entry.text_fields),
+                    contains_eager(Entry.datetime_fields),
+                    contains_eager(Entry.tags),
+                )
+
+            stmt = stmt.distinct()
+
+            entries = session.execute(stmt).scalars()
+            if with_joins:
+                entries = entries.unique()
+
+            for entry in entries:
+                yield entry
+                session.expunge(entry)
+
+    @property
+    def tags(self) -> list[Tag]:
+        with Session(self.engine) as session:
+            # load all tags and join parent tags
+            tags_query = select(Tag).options(selectinload(Tag.parent_tags))
+            tags = session.scalars(tags_query).unique()
+            tags_list = list(tags)
+
+            for tag in tags_list:
+                session.expunge(tag)
+
+        return list(tags_list)
+
+    def verify_ts_folder(self, library_dir: Path | None) -> bool:
+        """Verify/create folders required by TagStudio.
+
+        Returns:
+            bool: True if path exists, False if it needed to be created.
+        """
+        if library_dir is None:
+            raise ValueError("No path set.")
+
+        if not library_dir.exists():
+            raise ValueError("Invalid library directory.")
+
+        full_ts_path = library_dir / TS_FOLDER_NAME
+        if full_ts_path.exists():
+            return True
+
+        logger.info("creating library directory", dir=full_ts_path)
+        full_ts_path.mkdir(parents=True, exist_ok=True)
+        return False
+
+    def add_entries(self, items: list[Entry]) -> list[int]:
+        """Add multiple Entry records to the Library."""
+        assert items
+
+        with Session(self.engine) as session:
+            # add all items
+
+            try:
+                session.add_all(items)
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                logger.error("IntegrityError")
+                return []
+
+            new_ids = [item.id for item in items]
+            session.expunge_all()
+
+        return new_ids
+
+    def remove_entries(self, entry_ids: list[int]) -> None:
+        """Remove Entry items matching supplied IDs from the Library."""
+        with Session(self.engine) as session:
+            for sub_list in [
+                entry_ids[i : i + MAX_SQL_VARIABLES]
+                for i in range(0, len(entry_ids), MAX_SQL_VARIABLES)
+            ]:
+                session.query(Entry).where(Entry.id.in_(sub_list)).delete()
+            session.commit()
+
+    def has_entry_with_path(self, path: Path) -> bool:
+        """Check if an entry with this path is in the library."""
+        with Session(self.engine) as session:
+            return session.query(exists().where(Entry.path == path)).scalar()
+
+    def get_paths(self, limit: int = -1) -> list[str]:
+        path_strings: list[str] = []
+        with Session(self.engine) as session:
+            if limit > 0:
+                paths = session.scalars(select(Entry.path).limit(limit)).unique()
+            else:
+                paths = session.scalars(select(Entry.path)).unique()
+            path_strings = list(map(lambda x: x.as_posix(), paths))
+            return path_strings
+
+    def search_library(
+        self,
+        search: BrowsingState,
+        page_size: int | None,
+    ) -> SearchResult:
+        """Filter library by search query.
+
+        :return: number of entries matching the query and one page of results.
+        """
+        assert isinstance(search, BrowsingState)
+        assert self.library_dir
+
+        with Session(unwrap(self.engine), expire_on_commit=False) as session:
+            if page_size:
+                statement = (
+                    select(Entry.id, func.count().over())
+                    .offset(search.page_index * page_size)
+                    .limit(page_size)
+                )
+            else:
+                statement = select(Entry.id)
+
+            ast = search.ast
+
+            if not search.show_hidden_entries:
+                hidden_tag_ids = select(Tag.id).where(Tag.is_hidden)
+                hidden_entry_ids = select(TagEntry.entry_id).where(
+                    TagEntry.tag_id.in_(hidden_tag_ids)
+                )
+                statement = statement.where(Entry.id.not_in(hidden_entry_ids))
+
+            if ast:
+                start_time = time.time()
+                statement = statement.where(SQLBoolExpressionBuilder(self).visit(ast))
+                end_time = time.time()
+                logger.info(
+                    f"SQL Expression Builder finished ({format_timespan(end_time - start_time)})"
+                )
+
+            statement = statement.distinct(Entry.id)
+
+            sort_on: ColumnExpressionArgument = Entry.id
+            match search.sorting_mode:
+                case SortingModeEnum.DATE_ADDED:
+                    sort_on = Entry.id
+                case SortingModeEnum.FILE_NAME:
+                    sort_on = func.lower(Entry.filename)
+                case SortingModeEnum.PATH:
+                    sort_on = func.lower(Entry.path)
+                case SortingModeEnum.RANDOM:
+                    sort_on = func.sin(Entry.id * search.random_seed)
+
+            statement = statement.order_by(asc(sort_on) if search.ascending else desc(sort_on))
+
+            logger.info(
+                "searching library",
+                filter=search,
+                query_full=str(statement.compile(compile_kwargs={"literal_binds": True})),
+            )
+
+            start_time = time.time()
+            if page_size:
+                rows = session.execute(statement).fetchall()
+                ids = []
+                total_count = 0
+                for row in rows:
+                    ids.append(row[0])
+                    total_count = row[1]
+            else:
+                ids = list(session.scalars(statement))
+                total_count = len(ids)
+            end_time = time.time()
+            logger.info(f"SQL Execution finished ({format_timespan(end_time - start_time)})")
+
+            res = SearchResult(
+                total_count=total_count,
+                ids=ids,
+            )
+
+            session.expunge_all()
+
+            return res
+
+    def search_tags(self, name: str | None, limit: int = 100) -> tuple[list[Tag], list[Tag]]:
+        """Return a list of Tag records matching the query."""
+        if limit <= 0:
+            limit = sys.maxsize
+
+        search_query: str = name.lower() if name else ""
+
+        def sort_key(text: str):
+            priority = text.startswith(search_query)
+            p_ordering = len(text) if priority else sys.maxsize
+            return not priority, p_ordering, text
+
+        with Session(self.engine) as session:
+            query = select(Tag.id, Tag.name)
+
+            if limit > 0 and not search_query:
+                query = query.order_by(Tag.name).limit(limit)
+
+            if search_query:
+                query = query.where(
+                    or_(
+                        Tag.name.icontains(search_query),
+                        Tag.shorthand.icontains(search_query),
+                    )
+                )
+
+            tags = list(session.execute(query))
+
+            if search_query:
+                query = select(TagAlias.tag_id, TagAlias.name).where(
+                    TagAlias.name.icontains(search_query)
+                )
+                tags.extend(session.execute(query))
+
+            tags.sort(key=lambda t: sort_key(t[1]))
+            # Use order from Tag.name or TagAlias.name depending on which comes first for each tag.
+            # Value=0 to avoid unnecessary copying of tag names.
+            tag_ids = list(dict((id, 0) for id, _ in tags).keys())
+
+            logger.info(
+                "searching tags",
+                search=search_query,
+                limit=limit,
+                statement=str(query),
+                results=len(tag_ids),
+            )
+            tag_ids = tag_ids[:limit]
+
+            all_ids = set(tag_ids)
+            for tag_id in tag_ids:
+                if len(all_ids) >= limit:
+                    break
+                for id in session.scalars(TAG_CHILDREN_QUERY, {"tag_id": tag_id}):
+                    all_ids.add(id)
+                    if len(all_ids) >= limit:
+                        break
+
+            hierarchy = self.get_tag_hierarchy(all_ids)
+
+            direct_tags = [hierarchy.pop(id) for id in tag_ids]
+
+            all_ids.difference_update(tag_ids)
+            descendant_tags = [hierarchy.pop(id) for id in all_ids]
+            descendant_tags.sort(key=lambda t: sort_key(t.name))
+
+            return direct_tags, descendant_tags
+
+    def add_field_template(self, field_template: BaseFieldTemplate) -> BaseFieldTemplate | None:
+        """Add a new field template to the library."""
+        if not (isinstance(field_template, (TextFieldTemplate, DatetimeFieldTemplate))):
+            logger.error("[Library] BaseFieldTemplate attempted to be added to the library.")
+            return None
+
+        with Session(self.engine) as session:
+            try:
+                session.add(field_template)
+                session.flush()
+                make_transient(field_template)
+                session.commit()
+                return field_template
+            except IntegrityError as e:
+                logger.error(e)
+                session.rollback()
+                return None
+
+    def update_field_template(self, old_field_type: str, field_template: BaseFieldTemplate) -> bool:
+        """Update a field template in the library.
+
+        old_field_class:str
+        field_template: BaseFieldTemplate
+        """
+        with Session(self.engine) as session:
+            logger.warning(f"Updating old type {old_field_type} to new {field_template.class_name}")
+            is_same_type: bool = old_field_type == field_template.class_name
+            try:
+                update_stmt: Update | None = None
+                # If the template is changing type, remove the old one and add the updated
+                # template to the proper table.
+                if not is_same_type:
+                    old_template: BaseFieldTemplate | None = None
+                    if old_field_type == "TextFieldTemplate":
+                        old_template = session.scalar(
+                            select(TextFieldTemplate)
+                            .where(TextFieldTemplate.id == field_template.id)
+                            .limit(1)
+                        )
+                    elif old_field_type == "DatetimeFieldTemplate":
+                        old_template = session.scalar(
+                            select(DatetimeFieldTemplate)
+                            .where(DatetimeFieldTemplate.id == field_template.id)
+                            .limit(1)
+                        )
+                    if old_template is None:
+                        logger.error("[Library] old_template is None")
+                        return False
+                    session.delete(old_template)
+                    session.flush()
+                    field_template.id = None  # The id should not transfer between tables
+                    session.add(field_template)
+                    session.commit()
+                # Otherwise, update the existing template in-place
+                elif isinstance(field_template, TextFieldTemplate):
+                    update_stmt = (
+                        update(TextFieldTemplate)
+                        .where(TextFieldTemplate.id == field_template.id)
+                        .values(name=field_template.name, is_multiline=field_template.is_multiline)
+                    )
+                elif isinstance(field_template, DatetimeFieldTemplate):
+                    update_stmt = (
+                        update(DatetimeFieldTemplate)
+                        .where(DatetimeFieldTemplate.id == field_template.id)
+                        .values(name=field_template.name)
+                    )
+                if is_same_type:
+                    if update_stmt is None:
+                        return False
+                    session.execute(update_stmt)
+                    session.commit()
+
+            except IntegrityError as e:
+                logger.error(e)
+                session.rollback()
+                return False
+
+        return True
+
+    def remove_field_template(self, field_template: BaseFieldTemplate) -> bool:
+        """Remove a field template from the library."""
+        with Session(self.engine) as session:
+            try:
+                session_item: BaseFieldTemplate | None = None
+                if isinstance(field_template, TextFieldTemplate):
+                    session_item = session.scalar(
+                        select(TextFieldTemplate)
+                        .where(TextFieldTemplate.id == field_template.id)
+                        .limit(1)
+                    )
+                elif isinstance(field_template, DatetimeFieldTemplate):
+                    session_item = session.scalar(
+                        select(DatetimeFieldTemplate)
+                        .where(DatetimeFieldTemplate.id == field_template.id)
+                        .limit(1)
+                    )
+
+                if session_item is not None:
+                    session.delete(session_item)
+                    session.commit()
+
+            except IntegrityError as e:
+                logger.error(e)
+                session.rollback()
+                return False
+
+        return True
+
+    def search_field_templates(self, name: str | None, limit: int = 100) -> list[BaseFieldTemplate]:
+        """Return field template rows matching the query, detached from the session."""
+        if limit <= 0:
+            limit = sys.maxsize
+
+        search_query: str = name.lower() if name else ""
+
+        def sort_key(template: BaseFieldTemplate) -> tuple[str] | tuple[bool, int, str]:
+            text = template.name.lower()
+            if not search_query:
+                return (text,)
+            priority = text.startswith(search_query)
+            p_ordering = len(text) if priority else sys.maxsize
+            return (not priority, p_ordering, text)
+
+        with Session(self.engine) as session:
+            text_stmt = select(TextFieldTemplate)
+            datetime_stmt = select(DatetimeFieldTemplate)
+            if search_query:
+                text_stmt = text_stmt.where(TextFieldTemplate.name.icontains(search_query))
+                datetime_stmt = datetime_stmt.where(
+                    DatetimeFieldTemplate.name.icontains(search_query)
+                )
+
+            field_templates: list[BaseFieldTemplate] = [
+                *session.scalars(text_stmt),
+                *session.scalars(datetime_stmt),
+            ]
+            field_templates.sort(key=sort_key)
+            field_templates = field_templates[:limit]
+
+            for ft in field_templates:
+                session.expunge(ft)
+                make_transient(ft)
+
+            logger.info(
+                "Searching field templates",
+                search=search_query,
+                limit=limit,
+                results=len(field_templates),
+            )
+            return field_templates
+
+    def update_entry_path(self, entry_id: int | Entry, path: Path) -> bool:
+        """Set the path field of an entry.
+
+        Returns True if the action succeeded and False if the path already exists.
+        """
+        if self.has_entry_with_path(path):
+            return False
+        if isinstance(entry_id, Entry):
+            entry_id = entry_id.id
+
+        with Session(self.engine) as session:
+            update_stmt = (
+                update(Entry)
+                .where(
+                    and_(
+                        Entry.id == entry_id,
+                    )
+                )
+                .values(path=path)
+            )
+
+            session.execute(update_stmt)
+            session.commit()
+        return True
+
+    def remove_tag(self, tag_id: int) -> bool:
+        with Session(self.engine, expire_on_commit=False) as session:
+            try:
+                session.execute(delete(TagAlias).where(TagAlias.tag_id == tag_id))
+                session.execute(delete(TagEntry).where(TagEntry.tag_id == tag_id))
+                session.execute(
+                    delete(TagParent).where(
+                        or_(TagParent.child_id == tag_id, TagParent.parent_id == tag_id)
+                    )
+                )
+                session.execute(
+                    update(Tag)
+                    .where(Tag.disambiguation_id == tag_id)
+                    .values(disambiguation_id=None)
+                )
+                session.execute(delete(Tag).where(Tag.id == tag_id))
+                session.commit()
+
+            except IntegrityError as e:
+                logger.error(e)
+                session.rollback()
+                return False
+        return True
+
+    def remove_entry_field(
+        self,
+        field: BaseField,
+        entry_ids: list[int],
+    ) -> None:
+        field_type = type(field)
+
+        logger.info(
+            "remove_entry_field",
+            field=field,
+            type=field_type,
+            entry_ids=entry_ids,
+        )
+
+        with Session(self.engine) as session:
+            # remove all fields matching entry and field_type
+            delete_stmt = delete(field_type).where(
+                and_(
+                    field_type.id == field.id,
+                )
+            )
+
+            session.execute(delete_stmt)
+            session.commit()
+
+    def update_text_field(
+        self,
+        entry_ids: list[int] | int,
+        field: TextField,
+        name: str,
+        value: str,
+        is_multiline: bool,
+    ):
+        """Update a TextField field on one or more Entries."""
+        if isinstance(entry_ids, int):
+            entry_ids = [entry_ids]
+
+        field_type = type(field)
+
+        with Session(self.engine) as session:
+            update_stmt = (
+                update(field_type)
+                .where(and_(field_type.id == field.id, field_type.entry_id.in_(entry_ids)))
+                .values(name=name, value=value, is_multiline=is_multiline)
+            )
+
+            session.execute(update_stmt)
+            session.commit()
+
+    def update_datetime_field(
+        self,
+        entry_ids: list[int] | int,
+        field: DatetimeField,
+        name: str,
+        value: datetime,
+    ):
+        """Update a DatetimeField field on one or more Entries."""
+        if isinstance(entry_ids, int):
+            entry_ids = [entry_ids]
+
+        field_type = type(field)
+
+        with Session(self.engine) as session:
+            update_stmt = (
+                update(field_type)
+                .where(and_(field_type.id == field.id, field_type.entry_id.in_(entry_ids)))
+                .values(name=name, value=value)
+            )
+
+            session.execute(update_stmt)
+            session.commit()
+
+    def add_field_to_entries(self, entry_ids: list[int] | int, field: BaseField) -> bool:
+        """Add a field object to an Entry."""
+        if isinstance(entry_ids, int):
+            entry_ids = [entry_ids]
+
+        logger.info(
+            "[Library] Adding field to entry",
+            type=field.class_name,
+            entry_ids=entry_ids,
+            name=field.name,
+            value=field.value,
+        )
+
+        with Session(self.engine) as session:
+            for entry_id in entry_ids:
+                try:
+                    session.add(field.clone_with_entry_id(entry_id))
+                    session.commit()
+                except IntegrityError as e:
+                    logger.error(e)
+                    session.rollback()
+                    return False
+
+        return True
+
+    def tag_from_strings(self, strings: list[str] | str) -> list[int]:
+        """Create a Tag from a given string."""
+        # TODO: Port over tag searching with aliases fallbacks
+        # and context clue ranking for string searches.
+        tags: list[int] = []
+
+        if isinstance(strings, str):
+            strings = [strings]
+
+        with Session(self.engine) as session:
+            for string in strings:
+                tag = session.scalar(select(Tag).where(Tag.name == string))
+                if tag:
+                    tags.append(tag.id)
+                else:
+                    new = session.add(Tag(name=string))
+                    if new:
+                        tags.append(new.id)
+                        session.flush()
+            session.commit()
+        return tags
+
+    def add_namespace(self, namespace: Namespace) -> bool:
+        """Add a namespace value to the library.
+
+        Args:
+            namespace(str): The namespace slug. No special characters
+        """
+        with Session(self.engine) as session:
+            if not namespace.namespace:
+                logger.warning("[LIBRARY][add_namespace] Namespace slug must not be empty")
+                return False
+
+            slug = namespace.namespace
+            try:
+                slug = slugify(namespace.namespace)
+            except ReservedNamespaceError:
+                logger.error(
+                    f"[LIBRARY][add_namespace] Will not add a namespace with the reserved prefix:"
+                    f"{RESERVED_NAMESPACE_PREFIX}",
+                    namespace=namespace,
+                )
+
+            namespace_obj = Namespace(
+                namespace=slug,
+                name=namespace.name,
+            )
+
+            try:
+                session.add(namespace_obj)
+                session.commit()
+                return True
+            except IntegrityError:
+                session.rollback()
+                logger.error("IntegrityError")
+                return False
+
+    def delete_namespace(self, namespace: Namespace | str):
+        """Delete a namespace and any connected data from the library."""
+        if isinstance(namespace, str):
+            if namespace.startswith(RESERVED_NAMESPACE_PREFIX):
+                raise ReservedNamespaceError
+        else:
+            if namespace.namespace.startswith(RESERVED_NAMESPACE_PREFIX):
+                raise ReservedNamespaceError
+
+        with Session(self.engine, expire_on_commit=False) as session:
+            try:
+                namespace_: Namespace | None = None
+                if isinstance(namespace, str):
+                    namespace_ = session.scalar(
+                        select(Namespace).where(Namespace.namespace == namespace)
+                    )
+                else:
+                    namespace_ = namespace
+
+                if not namespace_:
+                    raise Exception
+                session.delete(namespace_)
+                session.flush()
+
+                colors = session.scalars(
+                    select(TagColorGroup).where(TagColorGroup.namespace == namespace_.namespace)
+                )
+                for color in colors:
+                    session.delete(color)
+                    session.flush()
+
+                session.commit()
+
+            except IntegrityError as e:
+                logger.error(e)
+                session.rollback()
+                return None
+
+    def add_tag(
+        self,
+        tag: Tag,
+        parent_ids: list[int] | set[int] | None = None,
+        aliases: Iterable[TagAlias] | None = None,
+        exclusion_ids: list[int] | set[int] | None = None,
+    ) -> Tag | None:
+        with Session(self.engine, expire_on_commit=False) as session:
+            try:
+                session.add(tag)
+                session.flush()
+
+                if parent_ids is not None:
+                    self.update_parent_tags(tag, parent_ids, session)
+                    session.flush()
+
+                if aliases is not None:
+                    for a in aliases:
+                        a.tag_id = tag.id
+                    self.update_aliases(tag, aliases, session)
+                    session.flush()
+
+                if exclusion_ids is not None:
+                    self._update_category_exclusion(tag, exclusion_ids, session)
+
+                session.commit()
+                session.expunge(tag)
+                return tag
+
+            except IntegrityError as e:
+                logger.error(e)
+                session.rollback()
+                return None
+
+    def add_tags_to_entries(
+        self, entry_ids: int | Iterable[int], tag_ids: int | Iterable[int]
+    ) -> int:
+        """Add one or more tags to one or more entries.
+
+        Returns:
+            The total number of tags added across all entries.
+        """
+        total_added: int = 0
+        logger.info(
+            "[Library][add_tags_to_entries]",
+            entry_ids=entry_ids,
+            tag_ids=tag_ids,
+        )
+
+        entry_ids_ = [entry_ids] if isinstance(entry_ids, int) else entry_ids
+        tag_ids_ = [tag_ids] if isinstance(tag_ids, int) else tag_ids
+        values: list[tuple[int, int]] = []
+        for tag_id in tag_ids_:
+            values.extend((tag_id, entry_id) for entry_id in entry_ids_)
+
+        with Session(self.engine, expire_on_commit=False) as session:
+            for sub_list in [
+                values[i : i + MAX_SQL_VARIABLES // 2]
+                for i in range(0, len(values), MAX_SQL_VARIABLES // 2)
+            ]:
+                stmt = (
+                    sqlite.insert(TagEntry)
+                    .values(sub_list)
+                    .on_conflict_do_nothing()
+                    .returning(TagEntry)
+                )
+                added = session.scalars(stmt).all()
+                total_added += len(added)
+            session.commit()
+
+        return total_added
+
+    def remove_tags_from_entries(
+        self, entry_ids: int | Iterable[int], tag_ids: int | Iterable[int]
+    ):
+        """Remove one or more tags from one or more entries."""
+        logger.info(
+            "[Library][remove_tags_from_entries]",
+            entry_ids=entry_ids,
+            tag_ids=tag_ids,
+        )
+
+        entry_ids_ = [entry_ids] if isinstance(entry_ids, int) else list(entry_ids)
+        tag_ids_ = [tag_ids] if isinstance(tag_ids, int) else list(tag_ids)
+
+        with Session(self.engine, expire_on_commit=False) as session:
+            for tags_sub_list in [
+                tag_ids_[i : i + MAX_SQL_VARIABLES // 2]
+                for i in range(0, len(tag_ids_), MAX_SQL_VARIABLES // 2)
+            ]:
+                for entries_sub_list in [
+                    entry_ids_[i : i + MAX_SQL_VARIABLES // 2]
+                    for i in range(0, len(entry_ids_), MAX_SQL_VARIABLES // 2)
+                ]:
+                    stmt = delete(TagEntry).where(
+                        and_(
+                            TagEntry.tag_id.in_(tags_sub_list),
+                            TagEntry.entry_id.in_(entries_sub_list),
+                        )
+                    )
+                    session.execute(stmt)
+            session.commit()
+
+    def add_color(self, color_group: TagColorGroup) -> TagColorGroup | None:
+        with Session(self.engine, expire_on_commit=False) as session:
+            try:
+                session.add(color_group)
+                session.commit()
+                session.expunge(color_group)
+                return color_group
+
+            except IntegrityError as e:
+                logger.error(
+                    "[Library] Could not add color, trying to update existing value instead.",
+                    error=e,
+                )
+                session.rollback()
+                return None
+
+    def delete_color(self, color: TagColorGroup):
+        with Session(self.engine, expire_on_commit=False) as session:
+            try:
+                session.delete(color)
+                session.commit()
+
+            except IntegrityError as e:
+                logger.error(e)
+                session.rollback()
+                return None
+
+    @staticmethod
+    def save_library_backup_to_disk(library_dir: Path) -> Path:
+        assert isinstance(library_dir, Path)
+        makedirs(str(library_dir / TS_FOLDER_NAME / BACKUP_FOLDER_NAME), exist_ok=True)
+
+        filename = f"ts_library_backup_{datetime.now(UTC).strftime('%Y_%m_%d_%H%M%S')}.sqlite"
+
+        target_path = library_dir / TS_FOLDER_NAME / BACKUP_FOLDER_NAME / filename
+
+        shutil.copy2(
+            library_dir / TS_FOLDER_NAME / SQL_FILENAME,
+            target_path,
+        )
+
+        logger.info("Library backup saved to disk.", path=target_path)
+
+        return target_path
+
+    def get_tag(self, tag_id: int) -> Tag | None:
+        with Session(self.engine) as session:
+            tags_query = select(Tag).options(
+                selectinload(Tag.parent_tags),
+                selectinload(Tag.aliases),
+                joinedload(Tag.color),
+                selectinload(Tag.category_exclusions),
+            )
+            tag = session.scalar(tags_query.where(Tag.id == tag_id))
+
+            if tag is not None:
+                session.expunge(tag)
+
+                for parent in tag.parent_tags:
+                    session.expunge(parent)
+
+                for alias in tag.aliases:
+                    session.expunge(alias)
+
+        return tag
+
+    def get_tag_by_name(self, tag_name: str) -> Tag | None:
+        with Session(self.engine) as session:
+            statement = (
+                select(Tag)
+                .options(selectinload(Tag.parent_tags), selectinload(Tag.aliases))
+                .outerjoin(TagAlias)
+                .where(or_(Tag.name == tag_name, TagAlias.name == tag_name))
+            )
+
+            tag = session.scalar(statement)
+
+            if tag is not None:
+                session.expunge(tag)
+
+                for parent in tag.parent_tags:
+                    session.expunge(parent)
+
+                for alias in tag.aliases:
+                    session.expunge(alias)
+
+        return tag
+
+    def get_alias(self, tag_id: int, alias_id: int) -> TagAlias | None:
+        with Session(self.engine) as session:
+            alias_query = select(TagAlias).where(TagAlias.id == alias_id, TagAlias.tag_id == tag_id)
+
+            return session.scalar(alias_query.where(TagAlias.id == alias_id))
+
+    def get_tag_color(self, slug: str, namespace: str) -> TagColorGroup | None:
+        with Session(self.engine) as session:
+            statement = select(TagColorGroup).where(
+                and_(TagColorGroup.slug == slug, TagColorGroup.namespace == namespace)
+            )
+
+            return session.scalar(statement)
+
+    def get_tag_hierarchy(self, tag_ids: Iterable[int]) -> dict[int, Tag]:
+        """Get a dictionary containing tags in `tag_ids` and all of their ancestor tags."""
+        current_tag_ids: set[int] = set(tag_ids)
+        all_tag_ids: set[int] = set()
+        all_tags: dict[int, Tag] = {}
+        all_tag_parents: dict[int, list[int]] = {}
+
+        with Session(self.engine) as session:
+            while len(current_tag_ids) > 0:
+                all_tag_ids.update(current_tag_ids)
+                statement = select(TagParent).where(TagParent.child_id.in_(current_tag_ids))
+                tag_parents = session.scalars(statement).fetchall()
+                current_tag_ids.clear()
+                for tag_parent in tag_parents:
+                    all_tag_parents.setdefault(tag_parent.child_id, []).append(tag_parent.parent_id)
+                    current_tag_ids.add(tag_parent.parent_id)
+                current_tag_ids = current_tag_ids.difference(all_tag_ids)
+
+            statement = select(Tag).where(Tag.id.in_(all_tag_ids))
+            statement = statement.options(
+                noload(Tag.parent_tags),
+                selectinload(Tag.aliases),
+                selectinload(Tag.category_exclusions),
+                joinedload(Tag.color),
+            )
+            tags = session.scalars(statement).fetchall()
+            for tag in tags:
+                all_tags[tag.id] = tag
+            for tag in all_tags.values():
+                try:
+                    # Sqlalchemy tracks this as a change to the parent_tags field
+                    tag.parent_tags = {all_tags[p] for p in all_tag_parents.get(tag.id, [])}
+                    # When calling session.add with this tag instance sqlalchemy will
+                    # attempt to create TagParents that already exist.
+
+                    state: InstanceState[Tag] = inspect(tag)
+                    # Prevent sqlalchemy from thinking fields are different from what's committed
+                    # committed_state contains original values for fields that have changed.
+                    # empty when no fields have changed
+                    state.committed_state.clear()
+                except KeyError as e:
+                    logger.error(
+                        "[LIBRARY][get_tag_hierarchy] Tag referenced by TagParent does not exist!",
+                        error=e,
+                    )
+
+        return all_tags
+
+    def add_parent_tag(self, parent_id: int, child_id: int) -> bool:
+        if parent_id == child_id:
+            return False
+
+        # open session and save as parent tag
+        with Session(self.engine) as session:
+            parent_tag = TagParent(
+                parent_id=parent_id,
+                child_id=child_id,
+            )
+
+            try:
+                session.add(parent_tag)
+                session.commit()
+                return True
+            except IntegrityError:
+                session.rollback()
+                logger.error("IntegrityError")
+                return False
+
+    def add_alias(self, name: str, tag_id: int) -> bool:
+        with Session(self.engine) as session:
+            if not name:
+                logger.warning("[LIBRARY][add_alias] Alias value must not be empty")
+                return False
+            alias = TagAlias(
+                name=name,
+                tag_id=tag_id,
+            )
+
+            try:
+                session.add(alias)
+                session.commit()
+                return True
+            except IntegrityError:
+                session.rollback()
+                logger.error("IntegrityError")
+                return False
+
+    def remove_parent_tag(self, base_id: int, remove_tag_id: int) -> bool:
+        with Session(self.engine) as session:
+            p_id = base_id
+            r_id = remove_tag_id
+            remove = session.query(TagParent).filter_by(parent_id=p_id, child_id=r_id).one()
+            session.delete(remove)
+            session.commit()
+
+        return True
+
+    def update_tag(
+        self,
+        tag: Tag,
+        parent_ids: list[int] | set[int] | None = None,
+        aliases: Iterable[TagAlias] | None = None,
+        exclusion_ids: list[int] | set[int] | None = None,
+    ) -> None:
+        """Edit a Tag in the Library."""
+        self.add_tag(tag, parent_ids, aliases, exclusion_ids)
+
+    def update_color(self, old_color_group: TagColorGroup, new_color_group: TagColorGroup) -> None:
+        """Update a TagColorGroup in the Library. If it doesn't already exist, create it."""
+        with Session(self.engine) as session:
+            existing_color = session.scalar(
+                select(TagColorGroup).where(
+                    and_(
+                        TagColorGroup.namespace == old_color_group.namespace,
+                        TagColorGroup.slug == old_color_group.slug,
+                    )
+                )
+            )
+            if existing_color:
+                update_color_stmt = (
+                    update(TagColorGroup)
+                    .where(
+                        and_(
+                            TagColorGroup.namespace == old_color_group.namespace,
+                            TagColorGroup.slug == old_color_group.slug,
+                        )
+                    )
+                    .values(
+                        slug=new_color_group.slug,
+                        namespace=new_color_group.namespace,
+                        name=new_color_group.name,
+                        primary=new_color_group.primary,
+                        secondary=new_color_group.secondary,
+                        color_border=new_color_group.color_border,
+                    )
+                )
+                session.execute(update_color_stmt)
+                session.flush()
+                update_tags_stmt = (
+                    update(Tag)
+                    .where(
+                        and_(
+                            Tag.color_namespace == old_color_group.namespace,
+                            Tag.color_slug == old_color_group.slug,
+                        )
+                    )
+                    .values(
+                        color_namespace=new_color_group.namespace,
+                        color_slug=new_color_group.slug,
+                    )
+                )
+                session.execute(update_tags_stmt)
+                session.commit()
+                return
+
+        # "if not existing_color", out of the session context
+        self.add_color(new_color_group)
+
+    def update_aliases(self, tag: Tag, aliases: Iterable[TagAlias], session: Session) -> bool:
+        """Update TagAliases for a given Tag."""
+        unique_alias_names: set[str] = set()
+        # Remove aliases that are no longer on the Tag
+        try:
+            old_aliases = session.scalars(select(TagAlias).where(TagAlias.tag_id == tag.id)).all()
+            unique_alias_names = set([x.name for x in old_aliases])
+            old_alias_ids: list[int] = [a.id for a in old_aliases]
+            for old_alias in old_aliases:
+                if old_alias.id not in [a.id for a in aliases] or not old_alias.name:
+                    logger.warning(
+                        "[Library] Deleting removed alias", id=old_alias.id, name=old_alias.name
+                    )
+                    session.delete(old_alias)
+            session.commit()
+        except IntegrityError as e:
+            session.rollback()
+            logger.error("[Library] Could not update aliases", error=e)
+            return False
+
+        # Update or Add aliases
+        for alias in aliases:
+            # Sanitize alias names
+            alias.name = alias.name.strip()
+            if not alias.name or alias.name in unique_alias_names:
+                continue
+
+            try:
+                if alias.id in old_alias_ids:
+                    stmt = update(TagAlias).where(TagAlias.id == alias.id).values(name=alias.name)
+                    session.execute(stmt)
+                else:
+                    session.add(alias)
+            except IntegrityError as e:
+                session.rollback()
+                logger.error("[Library] Could not update or add alias", error=e)
+                return False
+
+        session.commit()
+
+        return True
+
+    def update_parent_tags(self, tag: Tag, parent_ids: list[int] | set[int], session: Session):
+        if tag.id in parent_ids:
+            parent_ids.remove(tag.id)
+
+        if tag.disambiguation_id not in parent_ids:
+            tag.disambiguation_id = None
+
+        # load all tag's parent tags to know which to remove
+        prev_parent_tags = session.scalars(
+            select(TagParent).where(TagParent.child_id == tag.id)
+        ).all()
+
+        for parent_tag in prev_parent_tags:
+            if parent_tag.parent_id not in parent_ids:
+                session.delete(parent_tag)
+            else:
+                # no change, remove from list
+                parent_ids.remove(parent_tag.parent_id)
+
+                # create remaining items
+        for parent_id in parent_ids:
+            # add new parent tag
+            parent_tag = TagParent(
+                parent_id=parent_id,
+                child_id=tag.id,
+            )
+            session.add(parent_tag)
+
+    def _update_category_exclusion(
+        self, tag: Tag, exclusion_ids: list[int] | set[int], session: Session
+    ):
+        prev_exclusions = session.scalars(
+            select(CategoryExclusion).where(CategoryExclusion.tag_id == tag.id)
+        ).all()
+
+        for exclusion in prev_exclusions:
+            if exclusion.category_id not in exclusion_ids:
+                session.delete(exclusion)
+            else:
+                exclusion_ids.remove(exclusion.category_id)
+
+        for exclusion_id in exclusion_ids:
+            exclusion = CategoryExclusion(tag_id=tag.id, category_id=exclusion_id)
+            session.add(exclusion)
+
+    def get_version(self, key: str) -> int:
+        """Get a version value from the DB.
+
+        Args:
+            key(str): The key for the name of the version type to set.
+        """
+        with Session(self.engine) as session:
+            version = session.scalar(select(Version).where(Version.key == key))
+            if version is None:
+                logger.info(f"[Library] Couldn't get version of type '{key}'")
+                return 0
+            return version.value
+
+    def mirror_entry_fields(self, entries: list[Entry]) -> None:
+        """Mirror fields among multiple Entry items."""
+        all_fields: set[BaseField] = set()
+        logger.info("[Library][mirror_fields]", all_fields=all_fields)
+
+        # Track all fields across all entries
+        for entry in entries:
+            for field in entry.fields:
+                all_fields.add(field)
+            logger.info(
+                "[Library][mirror_fields]", entry_id=entry.id, field_count_before=len(entry.fields)
+            )
+
+        # Apply all (remaining) fields to all entries, avoiding duplicates
+        for entry in entries:
+            for field in all_fields:
+                if field not in entry.fields:
+                    self.add_field_to_entries(entry_ids=entry.id, field=field)
+
+    def merge_entries(self, from_entry: Entry, into_entry: Entry) -> bool:
+        """Add fields and tags from the first entry to the second, and then delete the first."""
+        success = False
+
+        try:
+            self.mirror_entry_fields([from_entry, into_entry])
+            tag_ids = [tag.id for tag in from_entry.tags]
+            self.add_tags_to_entries(into_entry.id, tag_ids)
+            self.remove_entries([from_entry.id])
+            success = True
+        except Exception as e:
+            logger.error(
+                "[Library][merge_entries] Could not merge entires",
+                error=e,
+                from_entry_id=from_entry.id,
+                into_entry_id=into_entry.id,
+            )
+
+        return success
+
+    @property
+    def tag_color_groups(self) -> dict[str, list[TagColorGroup]]:
+        """Return every TagColorGroup in the library."""
+        with Session(self.engine) as session:
+            color_groups: dict[str, list[TagColorGroup]] = {}
+            results = session.scalars(select(TagColorGroup).order_by(asc(TagColorGroup.namespace)))
+            for color in results:
+                if not color_groups.get(color.namespace):
+                    color_groups[color.namespace] = []
+                color_groups[color.namespace].append(color)
+                session.expunge(color)
+
+            # Add empty namespaces that are available for use.
+            empty_namespaces = session.scalars(
+                select(Namespace)
+                .where(Namespace.namespace.not_in(color_groups.keys()))
+                .order_by(asc(Namespace.namespace))
+            )
+            for en in empty_namespaces:
+                if not color_groups.get(en.namespace):
+                    color_groups[en.namespace] = []
+                session.expunge(en)
+
+        return dict(
+            sorted(
+                color_groups.items(),
+                key=lambda kv: self.get_namespace_name(kv[0]).lower(),
+            )
+        )
+
+    @property
+    def namespaces(self) -> list[Namespace]:
+        """Return every Namespace in the library."""
+        with Session(self.engine) as session:
+            namespaces = session.scalars(select(Namespace).order_by(asc(Namespace.name)))
+            return list(namespaces)
+
+    def get_namespace_name(self, namespace: str) -> str:
+        with Session(self.engine) as session:
+            result = session.scalar(select(Namespace).where(Namespace.namespace == namespace))
+            if result:
+                session.expunge(result)
+
+        return "" if not result else result.name
